@@ -18,9 +18,13 @@ export function getGlobalDataDir(): string {
 /**
  * Generates a unique, deterministic, filesystem-safe workspace ID for a given directory path.
  * Format: `<sanitized-folder-name>-<sha256-short-hash>` (e.g., `my-project-8f3a1b2c`)
+ *
+ * Path case is preserved on Unix (case-sensitive FS) and folded on Windows
+ * (case-insensitive FS) so two distinct Unix dirs never collide.
  */
 export function getWorkspaceId(cwd: string = process.cwd()): string {
-  const normalized = resolve(cwd).replace(/\\/g, "/").toLowerCase();
+  const resolved = resolve(cwd).replace(/\\/g, "/");
+  const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
   const folderName = basename(normalized).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase() || "workspace";
   const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
   return `${folderName}-${hash}`;

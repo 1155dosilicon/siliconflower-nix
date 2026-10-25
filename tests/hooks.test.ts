@@ -12,17 +12,21 @@ describe("hooks system", () => {
   });
 
   test("executes hook command with environment variables", async () => {
-    const echoCmd = "Write-Output \"$env:SILICONFLOWER_TOOL_NAME|$env:SILICONFLOWER_FILE_PATH\"";
+    const isWin = process.platform === "win32";
+    const echoCmd = isWin
+      ? "Write-Output \"$env:SILICONFLOWER_TOOL_NAME|$env:SILICONFLOWER_FILE_PATH\""
+      : "echo \"$SILICONFLOWER_TOOL_NAME|$SILICONFLOWER_FILE_PATH\"";
+    const filePath = isWin ? "C:\\workspace\\test.txt" : "/workspace/test.txt";
 
     const res = await runHook(
       "preTool",
       { preTool: echoCmd },
-      { toolName: "read_file", toolArgs: { path: "test.txt" }, filePath: "C:\\workspace\\test.txt" }
+      { toolName: "read_file", toolArgs: { path: "test.txt" }, filePath }
     );
 
     expect(res.executed).toBe(true);
     expect(res.output).toContain("read_file");
-    expect(res.output).toContain("C:\\workspace\\test.txt");
+    expect(res.output).toContain(filePath);
   });
 
   test("loads hooks from centralized workspace directory", async () => {

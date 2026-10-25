@@ -31,7 +31,10 @@ describe("tools", () => {
   });
 
   test("blocked paths prevent access to system directories", async () => {
-    const res = await runBuiltin("read_file", { path: "C:\\Windows\\System32\\config\\SAM" });
+    const blocked = process.platform === "win32"
+      ? "C:\\Windows\\System32\\config\\SAM"
+      : "/etc/passwd";
+    const res = await runBuiltin("read_file", { path: blocked });
     expect(res.isError).toBe(true);
     expect(res.result).toContain("bloqueado");
   });
@@ -45,7 +48,9 @@ describe("tools", () => {
   });
 
   test("execute_command runs shell commands and returns output", async () => {
-    const cmd = "Write-Output 'hello siliconflower'";
+    const cmd = process.platform === "win32"
+      ? "Write-Output 'hello siliconflower'"
+      : "echo 'hello siliconflower'";
     const res = await runBuiltin("execute_command", { command: cmd });
     expect(res.isError).toBe(false);
     expect(res.result).toContain("hello siliconflower");

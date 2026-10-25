@@ -20,6 +20,7 @@ import { enterWorktree, exitWorktree, listWorktrees } from "./services/worktree.
 import { runHook, loadHooksConfig } from "./core/hooks.js";
 import { processToolOutput } from "./context.js";
 import { tailLogs } from "./logger.js";
+import { getShellLabel, shellExecOptions, isWindows } from "./platform.js";
 import type { AppConfig, McpTool, Mode, TodoItem } from "./types.js";
 import { log } from "./logger.js";
 
@@ -937,12 +938,14 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
   },
   {
     name: "execute_command",
-    description:
-      "Executa um comando de sistema no terminal PowerShell do Windows. Retorna a saída padrão (stdout) e erros (stderr). Suporta 'runInBackground=true' para iniciar processos em segundo plano.",
+    description: `Executa um comando de sistema no terminal (${getShellLabel()}). Retorna a saída padrão (stdout) e erros (stderr). Suporta 'runInBackground=true' para iniciar processos em segundo plano.`,
     inputSchema: {
       type: "object",
       properties: {
-        command: { type: "string", description: "Comando PowerShell a ser executado" },
+        command: {
+          type: "string",
+          description: isWindows() ? "Comando PowerShell a ser executado" : "Comando de shell a ser executado",
+        },
         cwd: { type: "string", description: "Diretório de execução (padrão: diretório atual)" },
         timeout: { type: "number", description: "Tempo limite em ms (padrão: 30000ms)" },
         runInBackground: { type: "boolean", description: "Executar em segundo plano sem aguardar término" },
@@ -969,20 +972,20 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
 
       const rawTimeout = Number(a.timeout);
       const timeout = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.min(rawTimeout, 120000) : 30000;
-      const execOptions = {
+      const execOptions = shellExecOptions({
         cwd: workDir,
         timeout,
         maxBuffer: 10 * 1024 * 1024,
-        shell: "powershell.exe",
-        windowsHide: true,
         signal: ctx?.signal,
-      };
+      });
       try {
         await log("info", `execute_command: ${cmd} (cwd=${workDir})`);
         const { stdout, stderr } = await execAsync(cmd, execOptions);
+        const outStr = String(stdout ?? "").trim();
+        const errStr = String(stderr ?? "").trim();
         let output = "";
-        if (stdout.trim()) output += stdout.trim();
-        if (stderr.trim()) output += (output ? "\n--- STDERR ---\n" : "") + stderr.trim();
+        if (outStr) output += outStr;
+        if (errStr) output += (output ? "\n--- STDERR ---\n" : "") + errStr;
         if (!output) output = "(comando executado com sucesso sem saída de texto)";
         const processed = await processToolOutput(output);
         return { result: processed, isError: false };

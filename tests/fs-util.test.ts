@@ -6,14 +6,28 @@ import { ensureDir, hidePathOnWindows, getWorkspaceId, getWorkspaceDataDir, getG
 
 describe("fs-util", () => {
   test("getWorkspaceId generates consistent hash and slug", () => {
-    const id1 = getWorkspaceId("C:\\Projects\\MyApp");
-    const id2 = getWorkspaceId("C:/Projects/MyApp");
+    const sample = process.platform === "win32" ? "C:\\Projects\\MyApp" : "/home/user/Projects/MyApp";
+    const id1 = getWorkspaceId(sample);
+    const id2 = getWorkspaceId(sample.replace(/\\/g, "/"));
     expect(id1).toBe(id2);
     expect(id1).toContain("myapp-");
   });
 
+  test("getWorkspaceId preserves path case on Unix (no collision)", () => {
+    if (process.platform === "win32") return;
+    const a = getWorkspaceId("/home/user/Projects/MyApp");
+    const b = getWorkspaceId("/home/user/Projects/myapp");
+    expect(a).not.toBe(b);
+  });
+
+  test("getWorkspaceId folds path case on Windows", () => {
+    if (process.platform !== "win32") return;
+    expect(getWorkspaceId("C:\\Projects\\MyApp")).toBe(getWorkspaceId("c:\\projects\\myapp"));
+  });
+
   test("getWorkspaceDataDir returns path in ~/.siliconflower/workspaces", () => {
-    const wsDir = getWorkspaceDataDir("C:\\Projects\\SampleApp");
+    const sample = process.platform === "win32" ? "C:\\Projects\\SampleApp" : "/home/user/Projects/SampleApp";
+    const wsDir = getWorkspaceDataDir(sample);
     expect(wsDir).toContain(".siliconflower");
     expect(wsDir).toContain("workspaces");
     expect(wsDir).toContain("sampleapp-");

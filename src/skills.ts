@@ -1,6 +1,7 @@
 import { join, basename } from "node:path";
 import { readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { ensureDir, getGlobalDataDir } from "./fs-util.js";
+import { isWindows } from "./platform.js";
 
 export interface Skill {
   name: string;
@@ -67,7 +68,54 @@ Use esta skill quando o usuário pedir privacidade, telemetria, diagnóstico, an
 - Alterações no registro podem quebrar funcionalidades.
 - Algumas políticas exigem Windows Pro/Enterprise.
 - Reverter pode exigir restore do ponto de restauração.`,
+  "unix-backup.md": `# Unix Backup
+
+## Quando aplicar
+Use esta skill quando o usuário pedir backup, restore, snapshot ou proteção de dados em Linux/Unix.
+
+## Diretrizes
+- Prefira ferramentas nativas: \`rsync\`, \`tar\`, \`borg\`, \`restic\`, snapshots LVM/Btrfs/ZFS, \`timeshift\`.
+- Backup incremental com rsync: \`rsync -aHAX --delete --numeric-ids /origem/ /destino/\`.
+- Archive completo: \`tar -a -czf backup.tar.gz -C /origem .\`.
+- Sempre verifique espaço no destino antes de iniciar.
+- Teste o restore periodicamente — backup não testado não é backup.
+- Documente o procedimento de restore para o usuário.
+
+## Avisos
+- Operações em disco podem demorar horas.
+- Não interrompa um backup em andamento.
+- Preserve permissões, ownership e ACLs (\`-a\`, \`-p\`, \`-A\`, \`-X\`) quando relevante.`,
+  "unix-system.md": `# Unix System
+
+## Quando aplicar
+Use esta skill para operações de sistema em Linux/Unix: serviços, pacotes, rede, usuários, logs e hardening.
+
+## Diretrizes
+- Serviços: \`systemctl status|restart|enable <serviço>\`; logs via \`journalctl -u <serviço>\`.
+- Pacotes: \`apt\`, \`dnf\`, \`pacman\`, \`apk\` conforme a distro — confirme o gerenciador antes.
+- Rede: \`ip a\`, \`ss -tulpn\`, \`ping\`, \`curl -I\`.
+- Processos: \`ps aux\`, \`top\`/\`htop\`, \`kill <pid>\` (SIGTERM antes de SIGKILL).
+- Permissões: \`chmod\`, \`chown\`; prefira o princípio do menor privilégio.
+- Em contêineres/WWS: não assuma systemd; use os comandos disponíveis na imagem.
+
+## Avisos
+- Não execute \`rm -rf\` em caminhos do sistema sem confirmação explícita do usuário.
+- Alterações em \`/etc\`, fstab, boot ou usuários de sistema exigem aviso prévio de impacto.
+- Prefira comandos não-destrutivos e reversíveis.`,
 };
+
+/** Skills relevant for the current OS (plus shared ones). */
+function embeddedSkillsForPlatform(): Record<string, string> {
+  const winOnly = new Set(["windows-backup.md", "windows-privacy.md"]);
+  const unixOnly = new Set(["unix-backup.md", "unix-system.md"]);
+  const out: Record<string, string> = {};
+  for (const [name, content] of Object.entries(EMBEDDED_SKILLS)) {
+    if (isWindows() && unixOnly.has(name)) continue;
+    if (!isWindows() && winOnly.has(name)) continue;
+    out[name] = content;
+  }
+  return out;
+}
 
 export async function syncSkills(): Promise<{ copied: string[]; skipped: string[]; errors: string[] }> {
   await ensureDir(USER_SKILLS_DIR);
@@ -75,7 +123,7 @@ export async function syncSkills(): Promise<{ copied: string[]; skipped: string[
   const skipped: string[] = [];
   const errors: string[] = [];
 
-  for (const [name, content] of Object.entries(EMBEDDED_SKILLS)) {
+  for (const [name, content] of Object.entries(embeddedSkillsForPlatform())) {
     const dst = join(USER_SKILLS_DIR, name);
     try {
       const dstStat = await stat(dst).catch(() => null);

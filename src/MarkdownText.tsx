@@ -6,7 +6,7 @@ interface MarkdownTextProps {
 }
 
 /**
- * Renders Markdown formatting cleanly in Windows Terminal / Ink.
+ * Renders Markdown formatting cleanly in the terminal / Ink.
  */
 export const MarkdownText: React.FC<MarkdownTextProps> = ({ children }) => {
   if (!children) return null;

@@ -100,7 +100,8 @@ export async function runSetup(existing: AppConfig | null): Promise<AppConfig> {
   while (addMcp) {
     const name = await input({ message: "MCP server name:", validate: (v) => (v.trim() ? true : "required") });
     const command = await input({ message: "Command:", default: "npx", validate: (v) => (v.trim() ? true : "required") });
-    const argsRaw = await input({ message: "Arguments (space-separated):", default: "-y @modelcontextprotocol/server-filesystem C:/" });
+    const defaultFsPath = process.platform === "win32" ? "C:/" : "/";
+    const argsRaw = await input({ message: "Arguments (space-separated):", default: `-y @modelcontextprotocol/server-filesystem ${defaultFsPath}` });
     mcpServers[name.trim()] = {
       command: command.trim(),
       args: argsRaw.trim() ? argsRaw.trim().split(/\s+/) : [],

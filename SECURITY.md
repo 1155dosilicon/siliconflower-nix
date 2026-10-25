@@ -12,7 +12,7 @@ After configuration, the model can invoke tools that:
   resolved against your `cwd` if relative).
 - Search the file system recursively (`**/*.ts` supported).
 - Delete files and directories (`delete_path`).
-- Execute arbitrary PowerShell commands (`execute_command`) with the same
+- Execute arbitrary shell commands (`execute_command`) with the same
   privileges as the current user.
 - Spawn arbitrary MCP servers (whichever binary you configured).
 
@@ -46,7 +46,7 @@ privileges as the user running `siliconflower`.
   mode limits tool privileges. Only `plano` applies the read-only tool
   allowlist.
 - `execute_command` is intentionally an arbitrary shell capability. File-tool
-  guards do not sandbox PowerShell commands; only enable the agent where this
+  guards do not sandbox shell commands; only enable the agent where this
   trust level is acceptable.
 
 ## What you should still do

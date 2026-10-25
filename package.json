@@ -1,20 +1,22 @@
 {
   "name": "siliconflower",
   "version": "0.2.6",
-  "description": "CLI/TUI AI agent for Windows with MCP, reasoning control, skills, and OpenAI-compatible backends.",
+  "description": "CLI/TUI AI agent for Windows, Linux and Unix with MCP, reasoning control, skills, and OpenAI-compatible backends.",
   "os": [
-    "win32"
+    "win32",
+    "darwin",
+    "linux"
   ],
   "type": "module",
   "license": "MIT",
   "author": "siliconflower contributors",
-  "homepage": "https://github.com/siliconflower/siliconflower#readme",
+  "homepage": "https://github.com/1155dosilicon/siliconflower-nix#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/siliconflower/siliconflower.git"
+    "url": "https://github.com/1155dosilicon/siliconflower-nix.git"
   },
   "bugs": {
-    "url": "https://github.com/siliconflower/siliconflower/issues"
+    "url": "https://github.com/1155dosilicon/siliconflower-nix/issues"
   },
   "keywords": [
     "ai",
@@ -38,7 +40,7 @@
     "dev": "bun run src/index.tsx",
     "build": "bun run build.ts",
     "typecheck": "tsc --noEmit",
-    "install:bin": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1"
+    "install:bin": "node scripts/install-bin.js"
   },
   "dependencies": {
     "@inquirer/prompts": "^7.2.1",

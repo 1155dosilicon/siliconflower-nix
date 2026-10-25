@@ -3,10 +3,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Build script: produces a standalone siliconflower.exe via `bun build --compile`.
+ * Build script: produces a standalone siliconflower binary via `bun build --compile`.
  *
  * Usage:
- *   bun run build                # -> dist/siliconflower.exe (Windows x64)
+ *   bun run build                # -> dist/siliconflower[.exe] for the current platform
  *
  * Notes:
  *  - `react-devtools-core` is an optional peer of `ink`. It is only used by Ink
@@ -20,6 +20,29 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = here;
 const outDir = join(root, "dist");
+
+function resolveBunTarget(): { target: string; binName: string; binExt: string } {
+  const platform = process.platform;
+  const arch = process.arch;
+  const archMap: Record<string, string> = {
+    x64: "x64",
+    arm64: "arm64",
+    ia32: "ia32",
+    arm: "arm",
+  };
+  const bunArch = archMap[arch] ?? arch;
+
+  if (platform === "win32") {
+    return { target: `bun-windows-${bunArch}`, binName: "siliconflower", binExt: ".exe" };
+  }
+  if (platform === "darwin") {
+    return { target: `bun-darwin-${bunArch}`, binName: "siliconflower", binExt: "" };
+  }
+  return { target: `bun-linux-${bunArch}`, binName: "siliconflower", binExt: "" };
+}
+
+const { target: bunTarget, binName, binExt } = resolveBunTarget();
+const finalBin = `${binName}${binExt}`;
 
 const REACT_DEVTOOLS_SHIM = `
 const devtools = { connectToDevTools() {} };
@@ -120,7 +143,7 @@ const result = await Bun.build({
   entrypoints: [join(root, "src", "index.tsx")],
   outdir: outDir,
   compile: true,
-  target: "bun-windows-x64",
+  target: bunTarget as "bun-windows-x64",
   minify: {
     whitespace: true,
     syntax: true,
@@ -137,9 +160,9 @@ if (!result.success) {
 }
 
 // `bun build --compile` names the binary after the entrypoint (e.g. `src.exe`
-// for `src/index.tsx`). We rename it to the canonical `siliconflower.exe`.
+// for `src/index.tsx`). We rename it to the canonical `siliconflower[.exe]`.
 const produced = readdirSync(outDir)
-  .filter((f) => f.endsWith(".exe"))
+  .filter((f) => (binExt ? f.endsWith(binExt) : !f.includes(".")) || f === finalBin)
   .map((f) => {
     const p = join(outDir, f);
     return { f, p, size: statSync(p).size };
@@ -147,22 +170,22 @@ const produced = readdirSync(outDir)
   .sort((a, b) => b.size - a.size)[0];
 
 if (!produced) {
-  console.error("Nenhum binário .exe foi gerado em:", outDir);
+  console.error(`Nenhum binário '${finalBin}' foi gerado em:`, outDir);
   console.error("Conteúdo:", readdirSync(outDir));
   process.exit(1);
 }
 
-if (produced.f !== "siliconflower.exe") {
-  const target = join(outDir, "siliconflower.exe");
+if (produced.f !== finalBin) {
+  const target = join(outDir, finalBin);
   rmSync(target, { force: true });
   renameSync(produced.p, target);
 }
 
-const finalPath = join(outDir, "siliconflower.exe");
+const finalPath = join(outDir, finalBin);
 if (!existsSync(finalPath)) {
   console.error("Binário final não encontrado:", finalPath);
   process.exit(1);
 }
 
 const sizeMB = (statSync(finalPath).size / (1024 * 1024)).toFixed(1);
-console.log(`\n[ok] binário gerado: ${finalPath} (${sizeMB} MB)`);
+console.log(`\n[ok] binário gerado: ${finalPath} (${sizeMB} MB) [${bunTarget}]`);

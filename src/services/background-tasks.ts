@@ -1,5 +1,6 @@
-import { exec, execFile, ChildProcess } from "node:child_process";
+import { exec, ChildProcess } from "node:child_process";
 import { log } from "../logger.js";
+import { shellExecOptions, killProcessTree } from "../platform.js";
 
 export type BackgroundTaskType = "command" | "subagent";
 export type BackgroundTaskStatus = "running" | "completed" | "failed" | "killed";
@@ -54,7 +55,6 @@ export function settleBackgroundTask(
 export function startBackgroundCommand(command: string, cwd: string = process.cwd(), timeout = 300000): string {
   timeout = Number.isFinite(timeout) ? Math.min(3_600_000, Math.max(1_000, Math.floor(timeout))) : 300_000;
   const taskId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const shell = "powershell.exe";
 
   const taskRecord: BackgroundTaskRecord = {
     id: taskId,
@@ -71,10 +71,10 @@ export function startBackgroundCommand(command: string, cwd: string = process.cw
   backgroundTasks.set(taskId, taskRecord);
   let child: ChildProcess;
   try {
-    child = exec(command, { cwd, shell, windowsHide: true, timeout }, (error, stdout, stderr) => {
+    child = exec(command, shellExecOptions({ cwd, timeout }), (error, stdout, stderr) => {
       taskRecord.completedAt = new Date().toISOString();
-      stdoutBuf = stdout ? stdout.trim() : "";
-      stderrBuf = stderr ? stderr.trim() : "";
+      stdoutBuf = stdout ? String(stdout).trim() : "";
+      stderrBuf = stderr ? String(stderr).trim() : "";
 
       let finalOutput = stdoutBuf;
       if (stderrBuf) {
@@ -130,9 +130,7 @@ export function killBackgroundTask(id: string): { success: boolean; message: str
   if (task.processRef) {
     try {
       task.processRef.kill("SIGTERM");
-      if (task.processRef.pid) {
-        execFile("taskkill.exe", ["/pid", String(task.processRef.pid), "/T", "/F"], { windowsHide: true });
-      }
+      killProcessTree(task.processRef.pid);
     } catch {
       // Best effort kill
     }

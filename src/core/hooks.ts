@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { readFile, access } from "node:fs/promises";
 import { log } from "../logger.js";
 import { getWorkspaceDataDir, getGlobalDataDir } from "../fs-util.js";
+import { shellExecOptions } from "../platform.js";
 
 const execAsync = promisify(exec);
 
@@ -91,13 +92,11 @@ export async function runHook(
       SILICONFLOWER_FILE_PATH: context.filePath || "",
     };
 
-    const { stdout, stderr } = await execAsync(command, {
+    const { stdout, stderr } = await execAsync(command, shellExecOptions({
       cwd: effectiveCwd,
       env,
-      windowsHide: true,
       timeout: 30000,
-      shell: "powershell.exe",
-    });
+    }));
 
     const output = (stdout + (stderr ? `\nStderr: ${stderr}` : "")).trim();
     return { executed: true, command, output };

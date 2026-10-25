@@ -1,5 +1,6 @@
 import { streamChat } from "../llm.js";
 import { builtinToolsAsMcp, runBuiltin, isBuiltin } from "../tools.js";
+import { SKILL_TOOL, readSkillContent } from "../skills.js";
 import type { AppConfig, ChatMessage, StreamEvent } from "../types.js";
 import { registerBackgroundTask, settleBackgroundTask } from "./background-tasks.js";
 import { log } from "../logger.js";
@@ -165,7 +166,15 @@ export async function sendSubagentMessage(
 
 async function runSubagentExecution(opts: SubagentOptions, systemPrompt: string, session: SubagentSession): Promise<string> {
   // Tools available to subagent (exclude recursion on run_task)
-  const tools = builtinToolsAsMcp().filter((t) => t.name !== "run_task");
+  const tools = [
+    ...builtinToolsAsMcp().filter((t) => t.name !== "run_task"),
+    {
+      server: "skill",
+      name: SKILL_TOOL.name,
+      description: SKILL_TOOL.description,
+      inputSchema: SKILL_TOOL.inputSchema,
+    },
+  ];
 
   let accumulatedContent = "";
 
@@ -179,6 +188,14 @@ async function runSubagentExecution(opts: SubagentOptions, systemPrompt: string,
       reasoning: "none",
       signal: opts.signal,
       executeTool: async (name, args) => {
+        if (name === SKILL_TOOL.name) {
+          try {
+            const content = await readSkillContent(String(args.name ?? ""));
+            return { result: content, isError: false };
+          } catch (e) {
+            return { result: String(e), isError: true };
+          }
+        }
         if (isBuiltin(name)) {
           return runBuiltin(name, args, { config: opts.config });
         }

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Suporte a Linux/Unix (`src/platform.ts` e adaptadores):** O Siliconflower agora roda em Windows, Linux e macOS/Unix. Shell padrão: PowerShell no Windows; `$SHELL` (ou `/bin/bash`) em Unix. `execute_command`, hooks e background tasks usam a plataforma atual. Encerramento de processos usa `taskkill` no Windows e sinais de processo em Unix. Skills embutidas incluem `unix-backup.md` e `unix-system.md` (as skills `windows-*` só são sincronizadas no Windows).
+- **Build e instalação multiplataforma (`build.ts`, `scripts/install.sh`, `scripts/install-bin.js`):** `bun run build` gera `dist/siliconflower` no Linux/macOS ou `dist/siliconflower.exe` no Windows conforme a plataforma. `npm run install:bin` roteia para `scripts/install.sh` (`~/.local/bin`) em Unix e `scripts/install.ps1` no Windows. `package.json` aceita `win32`, `darwin` e `linux`.
+
+### Changed
+- **Persona e prompts de modo (`src/modes.ts`):** Identificam o SO e o shell ativos em vez de assumir Windows/PowerShell. O modo `sistema` foca em systemd/pacotes/shell em Unix e mantém PowerShell/registro no Windows.
+- **Testes e documentação:** Suíte de testes cross-platform; `README.md`, `LLMS.md` e `SECURITY.md` descrevem Windows, Linux e macOS/Unix.
+
 ## [0.2.6] - 2026-10-17
 
 ### Added

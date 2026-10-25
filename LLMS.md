@@ -6,7 +6,7 @@ Este documento serve como mapa arquitetural e guia de desenvolvimento do **Silic
 
 ## 🏗️ Visão Geral da Arquitetura
 
-O Siliconflower é um harness CLI/TUI autônomo para desenvolvimento de software, projetado exclusivamente para o ecossistema Windows (PowerShell/Bun/Node), operando sobre APIs compatíveis com OpenAI (SiliconFlow, OpenRouter, OpenAI, ...).
+O Siliconflower é um harness CLI/TUI autônomo para desenvolvimento de software, projetado para Windows, Linux e macOS/Unix (PowerShell/bash/sh + Bun/Node), operando sobre APIs compatíveis com OpenAI (SiliconFlow, OpenRouter, OpenAI, ...).
 
 ```text
 src/
@@ -112,7 +112,7 @@ O registro em `src/tools.ts` contém 33 ferramentas; `read_skill` é definida se
 | `grep_content` | Busca textual e regex recursiva no conteúdo dos arquivos com número de linha. | `src/grep.ts` |
 | `repo_map` | Gera visualização estrutural do repositório exibindo símbolos e assinaturas. | `src/services/repomap.ts` |
 | `find_symbol` | Localiza definições e assinaturas de símbolos específicos no código. | `src/services/repomap.ts` |
-| `execute_command` | Execução de comandos do sistema no terminal PowerShell com timeout e captura segura. | `src/tools.ts` |
+| `execute_command` | Execução de comandos do sistema no shell nativo (PowerShell no Windows, bash/sh em Unix) com timeout e captura segura. | `src/tools.ts` |
 | `read_logs` | Consulta e filtra logs de execução do Siliconflower. | `src/logger.ts` |
 | `ask_question` | Faz perguntas diretas ao usuário com opções interativas. | `src/tools.ts` |
 | `todowrite` | Gerencia o checklist interativo de tarefas exibido na interface TUI. | `src/todo.ts` |
@@ -171,7 +171,7 @@ Variáveis de ambiente injetadas nos hooks:
 - `SILICONFLOWER_COMMAND`
 - `SILICONFLOWER_FILE_PATH` (quando aplicável)
 
-Os hooks são executados pelo PowerShell, com timeout de 30 segundos. Com `hooks` definido em `config.json`, `preTool`, `postTool` e `onEdit` são executados para ferramentas nativas, exceto no modo `plano`; `onEdit` cobre `write_file`, `edit_file`, `apply_patch`, `move_path` e `delete_path`. `onSessionStart` e `onSessionEnd` também exigem configuração inline e são chamados no ciclo da TUI, inclusive no modo `plano`, pois não passam pela política de ferramentas.
+Os hooks são executados pelo shell padrão da plataforma (PowerShell no Windows; `$SHELL` ou `/bin/bash` em Linux/Unix), com timeout de 30 segundos. Com `hooks` definido em `config.json`, `preTool`, `postTool` e `onEdit` são executados para ferramentas nativas, exceto no modo `plano`; `onEdit` cobre `write_file`, `edit_file`, `apply_patch`, `move_path` e `delete_path`. `onSessionStart` e `onSessionEnd` também exigem configuração inline e são chamados no ciclo da TUI, inclusive no modo `plano`, pois não passam pela política de ferramentas.
 
 `onCommand` usa a configuração inline ou, se ausente, procura `hooks.json` nesta ordem: dados do workspace (`~/.siliconflower/workspaces/<workspace-id>/hooks.json`), caminho legado do projeto (`<workspace>/.siliconflower/hooks.json`) e configuração global (`~/.siliconflower/hooks.json`). `manage_hooks` também consulta essas fontes para exibir a configuração. Arquivos `hooks.json` não são mesclados com `config.json`; na implementação atual, apenas `onCommand` usa esses arquivos para executar um hook.
 
@@ -201,18 +201,18 @@ Cada conexão tem timeout de 20 segundos. Uma falha de inicialização é report
 
 `SILICONFLOWER_DATA_DIR` pode substituir `~/.siliconflower` para testes ou ambientes isolados.
 
-Os modos `programação` e `sistema` alteram o foco do prompt e mantêm as ferramentas disponíveis. Só `plano` aplica a allowlist somente leitura. O agente não roda em sandbox: `execute_command` pode executar comandos PowerShell com os privilégios do usuário; consulte [SECURITY.md](SECURITY.md) antes de usá-lo em um ambiente sensível.
+Os modos `programação` e `sistema` alteram o foco do prompt e mantêm as ferramentas disponíveis. Só `plano` aplica a allowlist somente leitura. O agente não roda em sandbox: `execute_command` pode executar comandos de shell com os privilégios do usuário; consulte [SECURITY.md](SECURITY.md) antes de usá-lo em um ambiente sensível.
 
 `delete_path` exige `confirm: true` em qualquer exclusão e protege raízes importantes; essa proteção não se estende a comandos PowerShell. `delete_artifact` e `forget_memory` removem do projeto por padrão. `exit_worktree` remove o worktree informado; `force: true` pode descartar alterações não salvas. Os worktrees criados ficam em `.worktrees/<branch>` dentro do repositório.
 
 ---
 
-## 🔨 Comandos de Build e Validação (Windows / Bun)
+## 🔨 Comandos de Build e Validação (Bun)
 
 - **Checagem de Tipos:** `bun run typecheck` ou `bun x tsc --noEmit`
 - **Suíte de Testes:** `bun test`
-- **Compilação do Executável Standalone:** `bun run build` (gera `dist/siliconflower.exe`)
-- **Instalação no PATH do Windows:** `npm run install:bin` (ou `scripts/install.ps1`)
+- **Compilação do Executável Standalone:** `bun run build` (gera `dist/siliconflower` no Linux/macOS ou `dist/siliconflower.exe` no Windows; o alvo é resolvido a partir da plataforma atual via `src/platform.ts` e `build.ts`)
+- **Instalação no PATH:** `npm run install:bin` (usa `scripts/install.sh` em Unix e `scripts/install.ps1` no Windows)
 - **Execução em Desenvolvimento:** `bun start` ou `bun run src/index.tsx`
 
 Antes de alterar a versão, confirme que `package.json` e `src/version.ts` estão alinhados. `src/version.ts` alimenta `--version` e a identificação do cliente MCP; `package.json` controla a versão do pacote. Para contribuições, consulte também [CONTRIBUTING.md](CONTRIBUTING.md) e [SECURITY.md](SECURITY.md).

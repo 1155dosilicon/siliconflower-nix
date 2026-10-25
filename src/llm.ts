@@ -192,6 +192,7 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
     let finishReason: string | null = null;
     let stepHasText = false;
     let stepHasThinking = false;
+    let toolCallChunkCount = 0;
 
     try {
       for await (const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>) {
@@ -244,7 +245,7 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
         yield { type: "text", text: delta.content };
       }
       if (delta.tool_calls) {
-        void log("info", `LLM step ${step}: tool_call chunk recebido (${delta.tool_calls.length} parciais)`);
+        toolCallChunkCount += delta.tool_calls.length;
         for (const tc of delta.tool_calls) {
           const idx = tc.index ?? 0;
           const buf = argBuffers.get(idx) ?? { args: "" };
@@ -259,7 +260,7 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
       detachRequestAbort();
     }
 
-    void log("info", `LLM step ${step}: finish_reason=${finishReason}, argBuffers=${argBuffers.size}`);
+    void log("info", `LLM step ${step}: finish_reason=${finishReason}, argBuffers=${argBuffers.size}, toolCallChunks=${toolCallChunkCount}`);
 
     for (const [, buf] of argBuffers) {
       if (buf.name) pendingCalls.push({ id: buf.id ?? `call_${Math.random().toString(36).slice(2)}`, name: buf.name, args: buf.args });

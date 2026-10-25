@@ -2,11 +2,11 @@
 
 ![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20PowerShell-0078D6.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6.svg)
 ![Bun](https://img.shields.io/badge/Bun-%3E%3D1.3-black.svg)
 ![Node](https://img.shields.io/badge/Node.js-%3E%3D20-green.svg)
 
-Agente de IA em terminal (CLI/TUI) de alta performance para desenvolvimento de software no Windows. Integra **34 ferramentas nativas**, **Subagentes Concorrentes & Background Tasks**, **Memória Persistente**, **Git Worktrees**, **RepoMap**, **Busca Web** e **Protocolo MCP**, compatível com **SiliconFlow, OpenRouter, OpenAI** e demais backends compatíveis com a API da OpenAI.
+Agente de IA em terminal (CLI/TUI) de alta performance para desenvolvimento de software em **Windows, Linux e macOS/Unix**. Integra **34 ferramentas nativas**, **Subagentes Concorrentes & Background Tasks**, **Memória Persistente**, **Git Worktrees**, **RepoMap**, **Busca Web** e **Protocolo MCP**, compatível com **SiliconFlow, OpenRouter, OpenAI** e demais backends compatíveis com a API da OpenAI.
 
 <p align="center">
   <img src="assets/preview.png" alt="SiliconFlower TUI Preview" width="100%" />
@@ -23,18 +23,18 @@ Agente de IA em terminal (CLI/TUI) de alta performance para desenvolvimento de s
 - ⚡ **Raciocínio & Modos de Operação**: Controle de *reasoning effort* (`Ctrl+E`) e modos de trabalho (`Ctrl+O`: `programação`, `sistema`, `plano`). Na API oficial Xiaomi MiMo, o atalho alterna o pensamento entre ligado e desligado.
 - 🖥️ **TUI com Scroll Livre & Viewport Limpo**: Inicialização com tela limpa e suporte nativo completo à rolagem com a rodinha do mouse em respostas longas e blocos de código (estilo Claude Code).
 - 🧩 **Ecossistema MCP & Hooks**: Suporte nativo ao Model Context Protocol e automações disparadas por eventos do ciclo de vida (`preTool`, `postTool`, `onEdit`, `onCommand`, `onSessionStart`, `onSessionEnd`).
-- 📦 **Binário Nativo Standalone**: Compilação para `.exe` único via Bun, sem necessidade de Node.js instalado.
+- 📦 **Binário Nativo Standalone**: Compilação para binário único via Bun (`.exe` no Windows, `siliconflower` em Linux/Unix), sem necessidade de Node.js instalado.
 
 ---
 
 ## 🚀 Início Rápido
 
 ### Pré-requisitos
-- Windows com PowerShell.
-- [Bun >= 1.3](https://bun.sh) para instalar dependências, executar a partir do código-fonte e compilar o `.exe`.
+- Windows (PowerShell), Linux ou macOS/Unix (bash/sh).
+- [Bun >= 1.3](https://bun.sh) para instalar dependências, executar a partir do código-fonte e compilar o binário.
 - Como alternativa ao Bun, Node.js >= 20 com npm pode executar o launcher local após `npm install` (`node bin/siliconflower.js`). O comando `bun run start` requer Bun.
 
-```powershell
+```bash
 # 1. Clonar e instalar dependências
 git clone https://github.com/siliconflower/siliconflower.git
 cd siliconflower
@@ -44,7 +44,16 @@ bun install
 bun run start
 ```
 
-### Compilar e Instalar no PATH do Windows
+### Compilar e Instalar no PATH
+
+**Linux / macOS:**
+```bash
+bun run build          # Gera dist/siliconflower
+npm run install:bin    # Copia para ~/.local/bin
+siliconflower          # Executa a partir de qualquer pasta
+```
+
+**Windows:**
 ```powershell
 bun run build          # Gera dist/siliconflower.exe
 npm run install:bin    # Adiciona ao PATH do usuário
@@ -78,7 +87,7 @@ As configurações globais e dados do Siliconflower ficam organizados em `~/.sil
 ```
 
 ### Comandos de Gerenciamento & Flags CLI
-```powershell
+```bash
 bun run start -- --help
 bun run start -- --version
 bun run start -- config       # Reabre o assistente de configuração
@@ -114,7 +123,7 @@ Quando `baseURL` usa `xiaomimimo.com` ou um subdomínio oficial, o Siliconflower
 
 ### Modos de Trabalho
 - **`programação`**: Acesso completo a ferramentas de código, leitura, escrita e testes.
-- **`sistema`**: Focado em administração de SO, processos e scripts PowerShell.
+- **`sistema`**: Focado em administração de SO, processos e scripts de shell (PowerShell no Windows, bash/sh em Linux/Unix).
 - **`plano`**: Modo de planejamento com allowlist de leitura, perguntas e checklist da sessão — bloqueia edições de arquivo, comandos e ferramentas MCP.
 
 `programação` e `sistema` mudam o foco do prompt, mas não isolam o agente nem limitam seus privilégios. O modo `plano` aplica uma allowlist explícita; ferramentas MCP e ferramentas não reconhecidas são bloqueadas por padrão. Hooks `onSessionStart` e `onSessionEnd` configurados inline ainda podem executar comandos nesse modo. Consulte [SECURITY.md](SECURITY.md) antes de conceder acesso ao computador.
@@ -127,7 +136,7 @@ O Siliconflower disponibiliza um conjunto completo de ferramentas integradas:
 
 - 📁 **Arquivos & Edição**: `read_file`, `write_file`, `edit_file` (fuzzy/newline matching), `apply_patch`, `list_directory`, `create_directory`, `move_path`, `delete_path`, `file_info`.
 - 🔍 **Busca & Navegação**: `search_files` (glob), `grep_content` (regex), `repo_map`, `find_symbol`.
-- 💻 **Execução & Tarefas**: `execute_command` (PowerShell arbitrário com os privilégios do usuário), `read_logs`, `ask_question`, `todowrite`, `read_skill`.
+- 💻 **Execução & Tarefas**: `execute_command` (shell arbitrário com os privilégios do usuário — PowerShell no Windows, bash/sh em Linux/Unix), `read_logs`, `ask_question`, `todowrite`, `read_skill`.
 - 🤖 **Subagentes & Async**: `run_task`, `send_subagent_message`, `manage_background_task`.
 - 🧠 **Memória & Worktrees**: `save_memory`, `recall_memory`, `forget_memory`, `enter_worktree`, `exit_worktree`, `list_worktrees`.
 - 📄 **Artefatos & Web**: `create_artifact`, `read_artifact`, `list_artifacts`, `delete_artifact`, `web_fetch` (HTML para Markdown), `web_search`, `manage_hooks`.
@@ -144,7 +153,7 @@ O Siliconflower disponibiliza um conjunto completo de ferramentas integradas:
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/Workspace"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/Workspace"]
     }
   }
 }
@@ -176,7 +185,7 @@ Crie arquivos Markdown em `~/.siliconflower/skills/` com instruções especializ
 - **HTTP 401:** confira a chave em `config.json` e a variável `SILICONFLOWER_API_KEY`.
 - **HTTP 404:** confira o endereço base (normalmente terminado em `/v1`) e o identificador exato do modelo no provedor.
 - **Servidor MCP indisponível:** confirme `command`, `args` e dependências do servidor. Falhas de conexão são exibidas como aviso; as ferramentas nativas continuam disponíveis. Consulte os detalhes com `bun run start -- logs`.
-- **Comando não encontrado após instalar o `.exe`:** abra uma nova janela do terminal para carregar o PATH atualizado.
+- **Comando não encontrado após instalar o binário:** abra uma nova janela do terminal para carregar o PATH atualizado.
 
 ---
 
@@ -192,7 +201,7 @@ siliconflower/
 │   ├── reasoning.ts    # Detecção do endpoint Xiaomi MiMo e opções de pensamento
 │   ├── tools.ts        # Registro central das 34 ferramentas nativas
 │   └── index.tsx       # CLI e comandos de entrada
-├── scripts/            # Scripts de instalação no Windows PATH
+├── scripts/            # Scripts de instalação (Windows / Linux / macOS)
 ├── tests/              # Suíte de testes unitários (bun test)
 ├── build.ts            # Pipeline de compilação Bun (.exe standalone)
 └── LLMS.md             # Guia de arquitetura e referência técnica
