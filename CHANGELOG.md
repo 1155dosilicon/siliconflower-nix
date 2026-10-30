@@ -156,11 +156,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - First-run wizard with provider presets for SiliconFlow, OpenRouter,
   OpenAI, and Anthropic.
 
-[Unreleased]: https://github.com/siliconflower/siliconflower/compare/siliconflower-0.2.6...HEAD
-[0.2.6]: https://github.com/siliconflower/siliconflower/compare/0.2.5...siliconflower-0.2.6
-[0.2.5]: https://github.com/siliconflower/siliconflower/compare/0.2.4...0.2.5
-[0.2.4]: https://github.com/siliconflower/siliconflower/compare/0.2.3...0.2.4
-[0.2.3]: https://github.com/siliconflower/siliconflower/compare/0.2.2...0.2.3
-[0.2.2]: https://github.com/siliconflower/siliconflower/compare/0.2.1...0.2.2
-[0.2.1]: https://github.com/siliconflower/siliconflower/compare/0.1.0...0.2.1
-[0.1.0]: https://github.com/siliconflower/siliconflower/releases/tag/0.1.0
+[Unreleased]: https://github.com/1155dosilicon/siliconflower-nix/commits/main
+[0.2.6]: https://github.com/1155dosilicon/siliconflower/compare/0.2.5...siliconflower-0.2.6
+[0.2.5]: https://github.com/1155dosilicon/siliconflower/compare/0.2.4...0.2.5
+[0.2.4]: https://github.com/1155dosilicon/siliconflower/compare/0.2.3...0.2.4
+[0.2.3]: https://github.com/1155dosilicon/siliconflower/compare/0.2.2...0.2.3
+[0.2.2]: https://github.com/1155dosilicon/siliconflower/compare/0.2.1...0.2.2
+[0.2.1]: https://github.com/1155dosilicon/siliconflower/compare/0.2.0...0.2.1
+[0.2.0]: https://github.com/1155dosilicon/siliconflower/releases/tag/0.2.0
+[0.1.0]: https://github.com/1155dosilicon/siliconflower
