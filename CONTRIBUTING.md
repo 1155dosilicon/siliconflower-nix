@@ -10,8 +10,8 @@ so contributions tend to come in three shapes:
 ## Development setup
 
 ```powershell
-git clone https://github.com/siliconflower/siliconflower.git
-cd siliconflower
+git clone https://github.com/1155dosilicon/siliconflower-nix.git
+cd siliconflower-nix
 bun install
 bun run typecheck
 bun run dev

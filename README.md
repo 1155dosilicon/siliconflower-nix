@@ -36,8 +36,8 @@ Agente de IA em terminal (CLI/TUI) de alta performance para desenvolvimento de s
 
 ```bash
 # 1. Clonar e instalar dependências
-git clone https://github.com/siliconflower/siliconflower.git
-cd siliconflower
+git clone https://github.com/1155dosilicon/siliconflower-nix.git
+cd siliconflower-nix
 bun install
 
 # 2. Iniciar (abre o wizard de configuração na 1ª execução)
