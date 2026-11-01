@@ -1,6 +1,6 @@
-import { exec, ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { log } from "../logger.js";
-import { shellExecOptions, killProcessTree } from "../platform.js";
+import { startShell, killProcessTree, describeFailure } from "../shell.js";
 
 export type BackgroundTaskType = "command" | "subagent";
 export type BackgroundTaskStatus = "running" | "completed" | "failed" | "killed";
@@ -65,16 +65,17 @@ export function startBackgroundCommand(command: string, cwd: string = process.cw
     startedAt: new Date().toISOString(),
   };
 
-  let stdoutBuf = "";
-  let stderrBuf = "";
-
   backgroundTasks.set(taskId, taskRecord);
   let child: ChildProcess;
   try {
-    child = exec(command, shellExecOptions({ cwd, timeout }), (error, stdout, stderr) => {
+    const started = startShell(command, { cwd, timeout });
+    child = started.child;
+    void started.done.then((res) => {
       taskRecord.completedAt = new Date().toISOString();
-      stdoutBuf = stdout ? String(stdout).trim() : "";
-      stderrBuf = stderr ? String(stderr).trim() : "";
+      // The process handle is no longer useful once it exits; drop it so it can be collected.
+      taskRecord.processRef = undefined;
+      const stdoutBuf = res.stdout.trim();
+      const stderrBuf = res.stderr.trim();
 
       let finalOutput = stdoutBuf;
       if (stderrBuf) {
@@ -83,14 +84,15 @@ export function startBackgroundCommand(command: string, cwd: string = process.cw
 
       if (taskRecord.status === "killed") return;
 
-      if (error) {
+      const failure = describeFailure(res, timeout);
+      if (failure) {
         taskRecord.status = "failed";
-        taskRecord.result = `Erro (${error.code || error.signal || "falha"}): ${error.message}\n${finalOutput}`;
+        taskRecord.result = `Erro (${failure})\n${finalOutput}`;
       } else {
         taskRecord.status = "completed";
         taskRecord.result = finalOutput || "(Comando em background concluído sem saída)";
       }
-      log("info", `[Background Task ${taskId}] concluída com status: ${taskRecord.status}`);
+      void log("info", `[Background Task ${taskId}] concluída com status: ${taskRecord.status}`);
       pruneFinishedTasks();
     });
   } catch (error) {
@@ -128,12 +130,9 @@ export function killBackgroundTask(id: string): { success: boolean; message: str
   }
 
   if (task.processRef) {
-    try {
-      task.processRef.kill("SIGTERM");
-      killProcessTree(task.processRef.pid);
-    } catch {
-      // Best effort kill
-    }
+    // killProcessTree runs `taskkill /T` before killing the parent, so child processes
+    // started by the command are not orphaned.
+    killProcessTree(task.processRef);
   }
   try {
     task.cancel?.();

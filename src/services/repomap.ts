@@ -1,5 +1,6 @@
 import { readdir, readFile } from "fs/promises";
 import { join, relative, extname, resolve, isAbsolute } from "path";
+import { IGNORED_SOURCE_DIRS } from "../fs-util.js";
 
 export interface SymbolInfo {
   name: string;
@@ -14,34 +15,9 @@ export interface FileSymbolMap {
   symbols: SymbolInfo[];
 }
 
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "out",
-  ".next",
-  "coverage",
-  "target",
-  "vendor",
-  ".siliconflower",
-]);
-
-const SUPPORTED_EXTS = new Set([
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".py",
-  ".go",
-  ".rs",
-  ".java",
-  ".c",
-  ".cpp",
-  ".h",
-  ".hpp",
-]);
+// Only extensions that extractSymbols actually understands; anything else would occupy
+// repo_map's maxFiles slots without producing symbols.
+const SUPPORTED_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs"]);
 
 /**
  * Extracts symbols from source code text using language-aware regex patterns.
@@ -60,9 +36,9 @@ export function extractSymbols(content: string, fileOrExt: string): SymbolInfo[]
       return;
     }
 
-    if ([".ts", ".tsx", ".js", ".jsx", ".mjs"].includes(ext)) {
+    if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(ext)) {
       // Exported functions, classes, interfaces, types
-      const exportFunc = trimmed.match(/^export\s+(async\s+)?function\s+([a-zA-Z0-9_$]+)\s*\(([^)]*)\)/);
+      const exportFunc = trimmed.match(/^export\s+(?:default\s+)?(async\s+)?function\s*\*?\s*([a-zA-Z0-9_$]+)\s*\(([^)]*)\)/);
       if (exportFunc) {
         symbols.push({ name: exportFunc[2], kind: "function", line: lineNum, signature: `export function ${exportFunc[2]}(${exportFunc[3]})` });
         return;
@@ -86,7 +62,13 @@ export function extractSymbols(content: string, fileOrExt: string): SymbolInfo[]
         return;
       }
 
-      const exportConstFunc = trimmed.match(/^export\s+const\s+([a-zA-Z0-9_$]+)\s*=\s*(async\s*)?\(([^)]*)\)\s*=>/);
+      const exportEnum = trimmed.match(/^export\s+(?:const\s+)?enum\s+([a-zA-Z0-9_$]+)/);
+      if (exportEnum) {
+        symbols.push({ name: exportEnum[1], kind: "enum", line: lineNum, signature: `export enum ${exportEnum[1]}` });
+        return;
+      }
+
+      const exportConstFunc = trimmed.match(/^export\s+const\s+([a-zA-Z0-9_$]+)\s*(?::[^=]+)?=\s*(async\s*)?\(([^)]*)\)\s*(?::[^=]+)?=>/);
       if (exportConstFunc) {
         symbols.push({ name: exportConstFunc[1], kind: "function", line: lineNum, signature: `export const ${exportConstFunc[1]} = (${exportConstFunc[3]}) =>` });
         return;
@@ -123,7 +105,24 @@ export function extractSymbols(content: string, fileOrExt: string): SymbolInfo[]
       }
       const goType = trimmed.match(/^type\s+([a-zA-Z0-9_]+)\s+(struct|interface)/);
       if (goType) {
-        symbols.push({ name: goType[1], kind: goType[2] as any, line: lineNum, signature: `type ${goType[1]} ${goType[2]}` });
+        symbols.push({
+          name: goType[1],
+          kind: goType[2] === "struct" ? "class" : "interface",
+          line: lineNum,
+          signature: `type ${goType[1]} ${goType[2]}`,
+        });
+        return;
+      }
+    } else if (ext === ".rs") {
+      const rsFn = trimmed.match(/^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([a-zA-Z0-9_]+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)/);
+      if (rsFn) {
+        symbols.push({ name: rsFn[1], kind: "function", line: lineNum, signature: `fn ${rsFn[1]}(${rsFn[2]})` });
+        return;
+      }
+      const rsType = trimmed.match(/^(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait)\s+([a-zA-Z0-9_]+)/);
+      if (rsType) {
+        const kind = rsType[1] === "struct" ? "class" : rsType[1] === "enum" ? "enum" : "interface";
+        symbols.push({ name: rsType[2], kind, line: lineNum, signature: `${rsType[1]} ${rsType[2]}` });
         return;
       }
     }
@@ -139,7 +138,7 @@ async function scanDirectoryFiles(dir: string, baseDir: string, fileList: string
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+      if (IGNORED_SOURCE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
         await scanDirectoryFiles(fullPath, baseDir, fileList);
@@ -173,12 +172,13 @@ export async function generateRepoMap(
   }
 
   const files = await scanDirectoryFiles(targetDir, rootDir);
-  const selectedFiles = files.slice(0, maxFiles);
 
   const resultMap: FileSymbolMap[] = [];
   let totalSymbols = 0;
 
-  for (const filePath of selectedFiles) {
+  // maxFiles counts files that actually contribute symbols, not files merely scanned.
+  for (const filePath of files) {
+    if (resultMap.length >= maxFiles) break;
     try {
       const content = await readFile(filePath, "utf8");
       const ext = extname(filePath).toLowerCase();

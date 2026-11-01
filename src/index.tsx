@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
-import { configExists, loadConfig, configFile, configDir } from "./config.js";
+import { configExists, loadConfig, loadStoredConfig, applyEnvOverrides, isValid, configFile, configDir } from "./config.js";
 import { ensureConfig, runSetup } from "./wizard.js";
 import { startApp } from "./App.js";
 import type { AppConfig, Mode, ReasoningLevel } from "./types.js";
@@ -10,6 +10,9 @@ import { skillsDir, loadSkills, syncSkills } from "./skills.js";
 import { logFile, tailLogs, clearLogs } from "./logger.js";
 import { log } from "./logger.js";
 import { getWorkspaceDataDir, getWorkspaceId } from "./fs-util.js";
+import { findProject, markerIn, resolveWorkspaceRoot, DEFAULT_MARKER, PROJECT_TEMPLATE } from "./project.js";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { APP_VERSION } from "./version.js";
 
 const program = new Command();
@@ -24,18 +27,25 @@ program
   .option("--base-url <url>", "override the API base URL")
   .option("--api-key <key>", "override the API key")
   .action(async (opts) => {
-    const exists = await configExists();
-    let config: AppConfig | null = null;
-    if (!exists) {
-      config = await runSetup(null);
-    } else {
-      config = await loadConfig();
-      if (!config) config = await runSetup(null);
-    }
     const overrides: { model?: string; reasoning?: ReasoningLevel; mode?: Mode } = {};
     if (opts.model) overrides.model = opts.model;
-    if (opts.reasoning) overrides.reasoning = normalizeReasoning(opts.reasoning);
-    if (opts.mode) overrides.mode = normalizeMode(opts.mode);
+    if (opts.reasoning) {
+      overrides.reasoning = normalizeReasoning(opts.reasoning);
+      if (!overrides.reasoning) throw new Error(`--reasoning inválido: "${opts.reasoning}". Use: ${REASONING_LEVELS.join(", ")}`);
+    }
+    if (opts.mode) {
+      overrides.mode = normalizeMode(opts.mode);
+      if (!overrides.mode) throw new Error(`--mode inválido: "${opts.mode}". Use: ${MODES.join(", ")}`);
+    }
+
+    // The wizard always works on (and saves) the stored file; environment overrides are
+    // applied on top only for this run and never written back to config.json.
+    let config: AppConfig | null = (await configExists()) ? await loadConfig() : null;
+    if (!config) {
+      config = applyEnvOverrides(await runSetup(null));
+    } else if (!isValid(config) && !(opts.baseUrl || opts.apiKey)) {
+      config = applyEnvOverrides(await runSetup(await loadStoredConfig()));
+    }
     if (opts.baseUrl) config.baseURL = opts.baseUrl;
     if (opts.apiKey) config.apiKey = opts.apiKey;
     await log("info", "=== siliconflower iniciado por CLI ===");
@@ -46,7 +56,7 @@ program
   .command("config")
   .description("Re-run the setup wizard")
   .action(async () => {
-    const existing = await loadConfig();
+    const existing = await loadStoredConfig();
     await runSetup(existing);
     console.log("Done. Run `siliconflower` to start.");
   });
@@ -57,15 +67,42 @@ program
   .action(async () => {
     console.log("Config path:", configFile());
     console.log("Config dir:", configDir());
-    console.log("Workspace ID:", getWorkspaceId());
+    const project = findProject();
+    console.log("Project:", project ? `${project.root} (${project.markerPath})` : "none — project memory is off in this folder");
+    console.log("Workspace ID:", getWorkspaceId(resolveWorkspaceRoot()));
     console.log("Workspace data dir:", getWorkspaceDataDir());
     const cfg = await loadConfig();
     if (!cfg) {
       console.log("No config found. Run `siliconflower config` to set one up.");
       return;
     }
+    const envOverrides = ["SILICONFLOWER_API_KEY", "SILICONFLOWER_BASE_URL", "SILICONFLOWER_MODEL"].filter(
+      (name) => process.env[name]?.trim()
+    );
+    if (envOverrides.length) console.log("Environment overrides active (not saved):", envOverrides.join(", "));
     const masked = { ...cfg, apiKey: cfg.apiKey ? "***" + cfg.apiKey.slice(-4) : "" };
     console.log(JSON.stringify(masked, null, 2));
+  });
+
+program
+  .command("init")
+  .description(`Turn the current folder into a project: creates ${DEFAULT_MARKER} (activates project memory)`)
+  .option("--agents", "create AGENTS.md instead of SILICONFLOWER.md")
+  .action(async (opts) => {
+    const cwd = process.cwd();
+    const existing = markerIn(cwd);
+    if (existing) {
+      console.log(`Already a project: ${existing}`);
+      return;
+    }
+    const parent = findProject(cwd);
+    if (parent) {
+      console.log(`Note: this folder is inside the project ${parent.root}; a marker here makes it a separate project.`);
+    }
+    const target = join(cwd, opts.agents ? "AGENTS.md" : DEFAULT_MARKER);
+    await writeFile(target, PROJECT_TEMPLATE, { encoding: "utf8", flag: "wx" });
+    console.log(`Created ${target}`);
+    console.log("Project memory is now active here. Edit the file with instructions for the agent (keep it short).");
   });
 
 program

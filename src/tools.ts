@@ -3,9 +3,8 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { resolve, isAbsolute, dirname, basename, parse, relative } from "node:path";
 import { homedir } from "node:os";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
 import { ensureDir } from "./fs-util.js";
+import { runShell, describeFailure } from "./shell.js";
 import { search } from "./glob-util.js";
 import { searchContent } from "./grep.js";
 import { setTodos } from "./todo.js";
@@ -20,17 +19,22 @@ import { enterWorktree, exitWorktree, listWorktrees } from "./services/worktree.
 import { runHook, loadHooksConfig } from "./core/hooks.js";
 import { processToolOutput } from "./context.js";
 import { tailLogs } from "./logger.js";
-import { getShellLabel, shellExecOptions, isWindows } from "./platform.js";
+import { getShellLabel, isWindows } from "./platform.js";
 import type { AppConfig, McpTool, Mode, TodoItem } from "./types.js";
 import { log } from "./logger.js";
 
-const execAsync = promisify(exec);
-const CANCELLABLE_BUILTINS = new Set(["execute_command", "run_task", "send_subagent_message", "web_fetch"]);
+// Builtins that honor the abort signal and are raced against TOOL_TIMEOUT_MS.
+const CANCELLABLE_BUILTINS = new Set(["execute_command", "web_fetch", "web_search"]);
+// Subagents run their own multi-step LLM loop (each request already has its own connect
+// timeout), so a fixed tool timeout would kill any task longer than a minute. They are
+// still cancelled through the parent abort signal (Ctrl+C).
 
 export interface ToolContext {
   config?: AppConfig;
   mode?: Mode;
   signal?: AbortSignal;
+  /** Interactive prompt provided by the TUI; absent in subagents and tests. */
+  askUser?: (question: string, options: string[] | undefined, signal?: AbortSignal) => Promise<string>;
 }
 
 export interface BuiltinTool {
@@ -253,9 +257,13 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
 
       try {
         let content = await readFile(path, "utf8");
+        const useCRLF = content.includes("\r\n");
+        // Match against the file's own line-ending style and keep it in the replacement.
+        const toFileEol = (s: string) => (useCRLF ? s.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n") : s);
         for (let i = 0; i < changes.length; i++) {
           const { oldText, newText } = changes[i];
-          const oldTextStr = String(oldText ?? "");
+          const rawOld = String(oldText ?? "");
+          const oldTextStr = content.includes(rawOld) ? rawOld : toFileEol(rawOld);
           if (!oldTextStr) {
             return { result: `Erro no bloco ${i + 1}: oldText não pode ser vazio`, isError: true };
           }
@@ -263,7 +271,7 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
             return { result: `Erro no bloco ${i + 1}: oldText não encontrado em ${path}`, isError: true };
           }
           const idx = content.indexOf(oldTextStr);
-          const newTextStr = String(newText ?? "");
+          const newTextStr = toFileEol(String(newText ?? ""));
           content = content.slice(0, idx) + newTextStr + content.slice(idx + oldTextStr.length);
         }
         await writeFile(path, content, "utf8");
@@ -349,16 +357,20 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       const role = (a.role as any) || "general";
       const customPrompt = a.customPrompt ? String(a.customPrompt) : undefined;
       const runInBackground = Boolean(a.runInBackground);
-      const result = await runSubagentTask({
-        config: ctx.config,
-        description: desc,
-        prompt,
-        role,
-        customPrompt,
-        runInBackground,
-        signal: ctx.signal,
-      });
-      return { result, isError: false };
+      try {
+        const result = await runSubagentTask({
+          config: ctx.config,
+          description: desc,
+          prompt,
+          role,
+          customPrompt,
+          runInBackground,
+          signal: ctx.signal,
+        });
+        return { result, isError: false };
+      } catch (e) {
+        return { result: `Erro no subagente: ${e instanceof Error ? e.message : String(e)}`, isError: true };
+      }
     },
   },
   {
@@ -461,7 +473,7 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
   {
     name: "save_memory",
     description:
-      "Salva uma memória persistente (regra de projeto, preferência do usuário ou instrução) que será lembrada em sessões futuras.",
+      "Salva uma memória persistente (regra de projeto, preferência do usuário ou instrução) para sessões futuras. Só nome e descrição entram no prompt; o conteúdo é lido sob demanda com recall_memory, então escreva uma descrição clara de uma linha. Escopo 'project' só funciona dentro de um projeto ativo (pasta com SILICONFLOWER.md ou AGENTS.md); 'global' vale em qualquer pasta.",
     inputSchema: {
       type: "object",
       properties: {
@@ -483,23 +495,28 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       required: ["name", "type", "description", "content"],
     },
     run: async (a) => {
-      const res = await saveMemory({
-        name: String(a.name),
-        type: a.type as any,
-        description: String(a.description),
-        content: String(a.content),
-        scope: (a.scope as any) || "project",
-      });
-      return { result: res.message, isError: false };
+      try {
+        const res = await saveMemory({
+          name: String(a.name),
+          type: a.type as any,
+          description: String(a.description),
+          content: String(a.content),
+          scope: a.scope === "global" ? "global" : "project",
+        });
+        return { result: res.message, isError: false };
+      } catch (e) {
+        return { result: `Erro ao salvar memória: ${e instanceof Error ? e.message : String(e)}`, isError: true };
+      }
     },
   },
   {
     name: "recall_memory",
-    description: "Consulta memórias persistentes salvas sobre o usuário ou sobre o projeto.",
+    description:
+      "Lê o conteúdo completo de memórias persistentes (o prompt traz apenas o índice com nome e descrição). Use o nome da memória do índice como query.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Termo de busca opcional para filtrar memórias" },
+        query: { type: "string", description: "Nome da memória ou termo de busca (vazio = todas)" },
       },
     },
     run: async (a) => {
@@ -535,7 +552,8 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
   },
   {
     name: "enter_worktree",
-    description: "Cria e ativa um Git Worktree temporário e isolado para alterações e testes seguros.",
+    description:
+      "Cria um Git Worktree isolado em <repo>/.worktrees/<branch> numa branch nova. NÃO muda o diretório de trabalho: passe o caminho retornado (ou caminhos dentro dele) nas ferramentas de arquivo e no 'cwd' de execute_command.",
     inputSchema: {
       type: "object",
       properties: {
@@ -550,17 +568,22 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
   },
   {
     name: "exit_worktree",
-    description: "Remove um Git Worktree temporário.",
+    description: "Remove um Git Worktree e, opcionalmente, a branch criada para ele.",
     inputSchema: {
       type: "object",
       properties: {
         worktreePath: { type: "string", description: "Caminho do worktree a remover" },
         force: { type: "boolean", description: "Forçar remoção mesmo se houver alterações não salvas" },
+        deleteBranch: {
+          type: "boolean",
+          default: false,
+          description: "Também apagar a branch do worktree (git branch -d; -D quando force=true)",
+        },
       },
       required: ["worktreePath"],
     },
     run: async (a) => {
-      const res = await exitWorktree(String(a.worktreePath), Boolean(a.force), process.cwd());
+      const res = await exitWorktree(String(a.worktreePath), Boolean(a.force), process.cwd(), Boolean(a.deleteBranch));
       return { result: res.result, isError: res.isError };
     },
   },
@@ -582,7 +605,7 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
   {
     name: "ask_question",
     description:
-      "Faz uma pergunta direta ao usuário com opções ou campo aberto para esclarecer dúvidas ou decisões durante a execução.",
+      "Faz uma pergunta direta ao usuário e aguarda a resposta digitada (ou o número de uma das opções) antes de continuar. Use para esclarecer dúvidas ou decisões durante a execução.",
     inputSchema: {
       type: "object",
       properties: {
@@ -595,11 +618,23 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       },
       required: ["question"],
     },
-    run: async (a) => {
+    run: async (a, ctx) => {
       const q = String(a.question);
       const opts = Array.isArray(a.options) ? a.options.map(String) : undefined;
+      if (ctx?.askUser) {
+        try {
+          const answer = await ctx.askUser(q, opts, ctx.signal);
+          return { result: `Resposta do usuário: ${answer}`, isError: false };
+        } catch (e) {
+          return { result: `Pergunta não respondida: ${e instanceof Error ? e.message : String(e)}`, isError: true };
+        }
+      }
+      // No interactive UI (e.g. inside a subagent): the caller must relay the question.
       const optsStr = opts && opts.length ? ` [Opções: ${opts.join(" | ")}]` : "";
-      return { result: `[PERGUNTA AO USUÁRIO]: ${q}${optsStr}`, isError: false };
+      return {
+        result: `[SEM INTERFACE INTERATIVA] Não foi possível perguntar ao usuário agora. Inclua esta pergunta na sua resposta final: ${q}${optsStr}`,
+        isError: false,
+      };
     },
   },
   {
@@ -735,7 +770,12 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       if (await isPathBlockedSafe(path)) return { result: `Acesso bloqueado: ${path}`, isError: true };
       try {
         const matches = await search(path, String(a.pattern), includeHidden);
-        return { result: matches.length ? matches.slice(0, 200).join("\n") : "(nenhum arquivo encontrado)", isError: false };
+        if (!matches.length) return { result: "(nenhum arquivo encontrado)", isError: false };
+        const shown = matches.slice(0, 200).join("\n");
+        const note = matches.length > 200
+          ? `\n... (mostrando 200 de ${matches.length}${matches.length >= 1000 ? "+" : ""} resultados; refine o padrão)`
+          : "";
+        return { result: shown + note, isError: false };
       } catch (e) {
         return { result: `Erro na busca: ${String(e)}`, isError: true };
       }
@@ -858,15 +898,19 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       required: ["id", "title", "type", "content", "summary"],
     },
     run: async (a) => {
-      const res = await createArtifact({
-        id: String(a.id),
-        title: String(a.title),
-        type: a.type as any,
-        content: String(a.content),
-        summary: String(a.summary),
-        scope: (a.scope as any) || "project",
-      });
-      return { result: res.message, isError: false };
+      try {
+        const res = await createArtifact({
+          id: String(a.id),
+          title: String(a.title),
+          type: a.type as any,
+          content: String(a.content),
+          summary: String(a.summary ?? ""),
+          scope: a.scope === "global" ? "global" : "project",
+        });
+        return { result: res.message, isError: false };
+      } catch (e) {
+        return { result: `Erro ao criar artefato: ${String(e)}`, isError: true };
+      }
     },
   },
   {
@@ -957,10 +1001,10 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       if (!cmd) return { result: "Nenhum comando fornecido.", isError: true };
       const workDir = a.cwd ? toAbs(String(a.cwd)) : process.cwd();
 
-      // Trigger onCommand hook if configured
-      if (ctx?.config?.hooks) {
-        await runHook("onCommand", ctx.config.hooks, { command: cmd, cwd: workDir });
-      }
+      // onCommand: inline config.json value first; otherwise runHook falls back to hooks.json
+      // (workspace -> legacy project -> global).
+      const inlineHooks = ctx?.config?.hooks?.onCommand?.trim() ? ctx.config.hooks : undefined;
+      await runHook("onCommand", inlineHooks, { command: cmd, cwd: workDir });
 
       if (a.runInBackground) {
         const taskId = startBackgroundCommand(cmd, workDir, a.timeout ? Number(a.timeout) : 300000);
@@ -972,32 +1016,22 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
 
       const rawTimeout = Number(a.timeout);
       const timeout = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.min(rawTimeout, 120000) : 30000;
-      const execOptions = shellExecOptions({
-        cwd: workDir,
-        timeout,
-        maxBuffer: 10 * 1024 * 1024,
-        signal: ctx?.signal,
-      });
-      try {
-        await log("info", `execute_command: ${cmd} (cwd=${workDir})`);
-        const { stdout, stderr } = await execAsync(cmd, execOptions);
-        const outStr = String(stdout ?? "").trim();
-        const errStr = String(stderr ?? "").trim();
+      await log("info", `execute_command: ${cmd} (cwd=${workDir})`);
+      const res = await runShell(cmd, { cwd: workDir, timeout, signal: ctx?.signal });
+      const outStr = res.stdout.trim();
+      const errStr = res.stderr.trim();
+      const failure = describeFailure(res, timeout);
+      if (!failure) {
         let output = "";
         if (outStr) output += outStr;
         if (errStr) output += (output ? "\n--- STDERR ---\n" : "") + errStr;
         if (!output) output = "(comando executado com sucesso sem saída de texto)";
-        const processed = await processToolOutput(output);
-        return { result: processed, isError: false };
-      } catch (e: any) {
-        const stdout = e.stdout ? String(e.stdout).trim() : "";
-        const stderr = e.stderr ? String(e.stderr).trim() : "";
-        let errMsg = `Erro ao executar comando (${e.code ?? e.signal ?? "erro"}): ${e.message || String(e)}`;
-        if (stdout) errMsg += `\n--- STDOUT ---\n${stdout}`;
-        if (stderr) errMsg += `\n--- STDERR ---\n${stderr}`;
-        const processed = await processToolOutput(errMsg);
-        return { result: processed, isError: true };
+        return { result: await processToolOutput(output), isError: false };
       }
+      let errMsg = `Erro ao executar comando (${failure})`;
+      if (outStr) errMsg += `\n--- STDOUT ---\n${outStr}`;
+      if (errStr) errMsg += `\n--- STDERR ---\n${errStr}`;
+      return { result: await processToolOutput(errMsg), isError: true };
     },
   },
 ];

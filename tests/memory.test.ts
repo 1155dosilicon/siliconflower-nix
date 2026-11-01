@@ -1,24 +1,31 @@
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterEach, beforeEach } from "bun:test";
 import { saveMemory, recallMemories, forgetMemory, buildMemorySystemPrompt } from "../src/services/memory.js";
-import { rm, access } from "node:fs/promises";
+import { rm, access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getWorkspaceDataDir } from "../src/fs-util.js";
+import { findProject } from "../src/project.js";
 
 describe("memory service", () => {
-  const testWorkspace = join(tmpdir(), `memory_test_${Date.now()}`);
+  let testWorkspace = "";
+
+  beforeEach(async () => {
+    testWorkspace = join(tmpdir(), `memory_test_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    await mkdir(testWorkspace, { recursive: true });
+    // The marker file is what activates project memory.
+    await writeFile(join(testWorkspace, "SILICONFLOWER.md"), "Use tabs. Rode bun test antes de concluir.", "utf8");
+  });
 
   afterEach(async () => {
     try {
-      await rm(testWorkspace, { recursive: true, force: true });
+      await rm(getWorkspaceDataDir(testWorkspace), { recursive: true, force: true });
     } catch {}
     try {
-      const wsDir = getWorkspaceDataDir(testWorkspace);
-      await rm(wsDir, { recursive: true, force: true });
+      await rm(testWorkspace, { recursive: true, force: true });
     } catch {}
   });
 
-  test("saves, recalls and builds memory system prompt without creating .siliconflower in workspace", async () => {
+  test("saves and recalls project memory without creating .siliconflower in the workspace", async () => {
     const saveRes = await saveMemory(
       {
         name: "test_rule",
@@ -32,7 +39,6 @@ describe("memory service", () => {
 
     expect(saveRes.message).toContain("salva com sucesso");
 
-    // Verify workspace directory does NOT have .siliconflower created in it
     let localDirExists = false;
     try {
       await access(join(testWorkspace, ".siliconflower"));
@@ -42,19 +48,82 @@ describe("memory service", () => {
     }
     expect(localDirExists).toBe(false);
 
-    // Verify memory file was written into centralized workspace storage
-    expect(saveRes.path).toContain(".siliconflower");
     expect(saveRes.path).toContain("workspaces");
 
     const memories = await recallMemories("clean code", testWorkspace);
-    expect(memories.length).toBeGreaterThanOrEqual(1);
     const found = memories.find((m) => m.name === "test_rule");
-    expect(found).toBeDefined();
     expect(found?.content).toContain("Rule details");
+  });
+
+  test("system prompt carries project instructions and only an index of memories", async () => {
+    await saveMemory(
+      {
+        name: "deploy_steps",
+        type: "project",
+        description: "Como fazer deploy",
+        scope: "project",
+        content: "CONTEUDO_LONGO_SECRETO_DO_DEPLOY",
+      },
+      testWorkspace
+    );
 
     const prompt = await buildMemorySystemPrompt(testWorkspace);
-    expect(prompt).toContain("test_rule");
-    expect(prompt).toContain("Memória Persistente");
+    expect(prompt).toContain("Use tabs. Rode bun test antes de concluir.");
+    expect(prompt).toContain("deploy_steps");
+    expect(prompt).toContain("Como fazer deploy");
+    expect(prompt).toContain("recall_memory");
+    // Full content is loaded on demand only.
+    expect(prompt).not.toContain("CONTEUDO_LONGO_SECRETO_DO_DEPLOY");
+  });
+
+  test("subfolders share the project memory", async () => {
+    const sub = join(testWorkspace, "src", "deep");
+    await mkdir(sub, { recursive: true });
+    expect(findProject(sub)?.root).toBe(testWorkspace);
+    expect(getWorkspaceDataDir(sub)).toBe(getWorkspaceDataDir(testWorkspace));
+
+    await saveMemory(
+      { name: "shared", type: "project", description: "d", scope: "project", content: "c" },
+      sub
+    );
+    const fromRoot = await recallMemories("shared", testWorkspace);
+    expect(fromRoot.some((m) => m.name === "shared")).toBe(true);
+  });
+
+  test("folders without a marker have project memory disabled", async () => {
+    const plain = join(tmpdir(), `memory_plain_${Date.now()}`);
+    await mkdir(plain, { recursive: true });
+    try {
+      expect(findProject(plain)).toBeNull();
+      await expect(
+        saveMemory({ name: "x", type: "project", description: "d", scope: "project", content: "c" }, plain)
+      ).rejects.toThrow("Memória de projeto desativada");
+
+      expect((await forgetMemory("x", plain, "project")).isError).toBe(true);
+      const prompt = await buildMemorySystemPrompt(plain);
+      expect(prompt).toContain("Nenhum projeto ativo");
+      // Reads never create data directories for non-project folders.
+      let created = true;
+      try {
+        await access(join(getWorkspaceDataDir(plain), "memory"));
+      } catch {
+        created = false;
+      }
+      expect(created).toBe(false);
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
+  });
+
+  test("AGENTS.md also activates a project", async () => {
+    const dir = join(tmpdir(), `memory_agents_${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "AGENTS.md"), "regras", "utf8");
+    try {
+      expect(findProject(dir)?.markerPath).toBe(join(dir, "AGENTS.md"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("forgets memory by name", async () => {
@@ -74,8 +143,7 @@ describe("memory service", () => {
     expect(forgetRes.message).toContain("removida com sucesso");
 
     const memories = await recallMemories("obsolete_rule", testWorkspace);
-    const found = memories.find((m) => m.name === "obsolete_rule");
-    expect(found).toBeUndefined();
+    expect(memories.find((m) => m.name === "obsolete_rule")).toBeUndefined();
   });
 
   test("forgets only the requested memory scope", async () => {
@@ -94,5 +162,16 @@ describe("memory service", () => {
     expect(remaining.some((entry) => entry.scope === "global")).toBe(true);
     expect(remaining.some((entry) => entry.scope === "project")).toBe(false);
     await forgetMemory(name, testWorkspace, "global");
+  });
+
+  test("multi-line descriptions don't break the frontmatter", async () => {
+    await saveMemory(
+      { name: "multi", type: "user", description: "linha 1\nlinha 2", scope: "project", content: "name: falso" },
+      testWorkspace
+    );
+    const [m] = await recallMemories("multi", testWorkspace);
+    expect(m.name).toBe("multi");
+    expect(m.description).toBe("linha 1 linha 2");
+    expect(m.content).toBe("name: falso");
   });
 });

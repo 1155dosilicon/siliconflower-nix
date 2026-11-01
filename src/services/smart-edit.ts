@@ -44,12 +44,15 @@ export async function smartEditFile(options: EditOptions): Promise<EditResult> {
 
     // Strategy 1: Exact match
     if (originalRaw.includes(oldText)) {
+      // Keep the file's line-ending style: a single-line oldText can match exactly in a
+      // CRLF file while newText arrives with bare LF, which would mix line endings.
+      const replacement = useCRLF ? normalizeNewlines(newText).replace(/\n/g, "\r\n") : newText;
       let updated: string;
       if (replaceAll) {
-        updated = originalRaw.split(oldText).join(newText);
+        updated = originalRaw.split(oldText).join(replacement);
       } else {
         const idx = originalRaw.indexOf(oldText);
-        updated = originalRaw.slice(0, idx) + newText + originalRaw.slice(idx + oldText.length);
+        updated = originalRaw.slice(0, idx) + replacement + originalRaw.slice(idx + oldText.length);
       }
       if (updated === originalRaw) {
         return { result: `Nenhuma alteração em ${path}`, isError: false };

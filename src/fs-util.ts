@@ -4,8 +4,24 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
+import { resolveWorkspaceRoot } from "./project.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Directories skipped by grep_content, repo_map and find_symbol (dot-directories such as
+ * .git, .vscode, .worktrees and .siliconflower are skipped separately by every walker).
+ */
+export const IGNORED_SOURCE_DIRS = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  "target",
+  "vendor",
+  "__pycache__",
+]);
 
 /**
  * Returns the global siliconflower data and configuration directory (~/.siliconflower).
@@ -36,7 +52,9 @@ export function getWorkspaceId(cwd: string = process.cwd()): string {
  * This ensures the user's project/repository remains completely clean without polluting it with `.siliconflower` folders.
  */
 export function getWorkspaceDataDir(cwd: string = process.cwd()): string {
-  return join(getGlobalDataDir(), "workspaces", getWorkspaceId(cwd));
+  // Keyed by the project root (folder holding .siliconflower/AGENTS.md, SILICONFLOWER.md or
+  // AGENTS.md) so every subfolder of a project shares the same data; falls back to cwd.
+  return join(getGlobalDataDir(), "workspaces", getWorkspaceId(resolveWorkspaceRoot(cwd)));
 }
 
 /**
@@ -58,6 +76,10 @@ export async function hidePathOnWindows(targetPath: string): Promise<void> {
  * the Windows hidden attribute (`attrib +h`) to the `.siliconflower` folder so it remains
  * hidden in Windows File Explorer.
  */
+// ensureDir runs on hot paths (every message loads memories); spawning attrib.exe each
+// time is wasteful, so each `.siliconflower` folder is hidden once per process.
+const hiddenPaths = new Set<string>();
+
 export async function ensureDir(dirPath: string): Promise<string | undefined> {
   const result = await mkdir(dirPath, { recursive: true });
 
@@ -66,7 +88,11 @@ export async function ensureDir(dirPath: string): Promise<string | undefined> {
     const idx = parts.findIndex((p) => p === ".siliconflower");
     if (idx !== -1) {
       const siliconflowerPath = parts.slice(0, idx + 1).join("\\");
-      await hidePathOnWindows(siliconflowerPath);
+      const key = siliconflowerPath.toLowerCase();
+      if (!hiddenPaths.has(key)) {
+        hiddenPaths.add(key);
+        await hidePathOnWindows(siliconflowerPath);
+      }
     }
   }
 
