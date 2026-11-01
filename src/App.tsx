@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
-import { render, Box, Static, Text, useApp, useInput, useStdout } from "ink";
+import { render, Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { renderLogo } from "./ascii.js";
 import { streamChat } from "./llm.js";
@@ -11,7 +11,6 @@ import { buildMemorySystemPrompt } from "./services/memory.js";
 import { onTodosChange } from "./todo.js";
 import { estimateTokens, estimateMessagesTokens, formatTokenCount } from "./context.js";
 import { MarkdownText } from "./MarkdownText.js";
-import { LiveResponse } from "./LiveResponse.js";
 import { log, logFile } from "./logger.js";
 import type { AppConfig, ChatMessage, McpTool, ReasoningLevel, StreamEvent, TodoItem } from "./types.js";
 import { isToolAllowedInMode } from "./tool-policy.js";
@@ -43,11 +42,6 @@ const RESIZE_SETTLE_MS = 150;
 // Streamed text is pushed to the UI at most this often (the MarkdownText re-parse and the
 // Ink frame diff are paid per update, not per token).
 const LIVE_TEXT_FLUSH_MS = 60;
-// Longer than Ink's 32 ms render throttle, so the frame at the new width is already on
-// screen (and is Ink's lastOutput) when the screen is wiped.
-const REPAINT_DELAY_MS = 50;
-
-type StaticItem = { kind: "logo"; key: string } | { kind: "message"; key: string; message: UIMessage };
 
 const MessageView: React.FC<{ message: UIMessage }> = ({ message: m }) => (
   <Box flexDirection="column" marginBottom={1}>
@@ -78,7 +72,6 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
   const [todos, setTodosState] = useState<TodoItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [cols, setCols] = useState(stdout?.columns ?? 100);
-  const [rows, setRows] = useState(stdout?.rows ?? 30);
   const [apiTokens, setApiTokens] = useState(0);
   // Last memory/project prompt segment, so the token counter reflects what is really sent.
   const [memoryPrompt, setMemoryPrompt] = useState("");
@@ -105,13 +98,8 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
 
   // Ink only erases "the N lines of the previous frame" on resize, but the terminal has
   // already reflowed those lines into a different number of rows, so fragments of old
-  // frames pile up (e.g. a stacked logo under the full one). Once resizing settles:
-  //  1. cols/rows update, so Ink draws the live frame at the new width;
-  //  2. the screen and scrollback are wiped through Ink's write() (which then redraws that
-  //     frame, keeping its line bookkeeping right);
-  //  3. <Static> (logo + finished messages) is remounted, so Ink reprints the whole
-  //     scrollback at the new width above the live frame.
-  const [staticGen, setStaticGen] = useState(0);
+  // frames pile up (e.g. a stacked logo under the full one). Once resizing settles, wipe
+  // the screen and repaint the whole frame.
   const [repaintTick, setRepaintTick] = useState(0);
   useEffect(() => {
     if (!stdout) return;
@@ -120,7 +108,6 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         setCols(stdout.columns);
-        setRows(stdout.rows);
         setRepaintTick((t) => t + 1);
       }, RESIZE_SETTLE_MS);
     };
@@ -133,11 +120,9 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
 
   useEffect(() => {
     if (repaintTick === 0) return;
-    const timer = setTimeout(() => {
-      writeToStdout(ANSI_CLEAR_SCREEN);
-      setStaticGen((g) => g + 1);
-    }, REPAINT_DELAY_MS);
-    return () => clearTimeout(timer);
+    // Ink's write(): resets its frame bookkeeping, writes our data (clear screen + scrollback,
+    // cursor home) and then redraws the full current frame from scratch.
+    writeToStdout(ANSI_CLEAR_SCREEN);
   }, [repaintTick, writeToStdout]);
 
   useEffect(() => {
@@ -462,45 +447,24 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
   const totalTokens = Math.max(estimatedTotal, apiTokens);
 
   const sep = "-".repeat(Math.min(cols - 2, 80));
-  // Logo and finished messages go to <Static>: Ink prints them once into the scrollback and
-  // never redraws them. Keeping them in the live frame made it taller than the terminal,
-  // and then Ink clears and repaints the whole screen on every streamed token (flicker).
-  const staticItems: StaticItem[] = [
-    { kind: "logo", key: "logo" },
-    ...messages.map((m, i) => ({ kind: "message" as const, key: `m${i}`, message: m })),
-  ];
-
-  // Rows of the live frame other than the streamed text (separators, input, status bar,
-  // log line, error, to-do list, question box), estimated on the high side.
-  const statusBarRows = cols < 100 ? 3 : 2;
-  const chromeRows =
-    9 + statusBarRows +
-    (error ? Math.ceil((error.length + 8) / Math.max(10, cols)) : 0) +
-    (todos.length > 0 ? todos.length + 5 : 0) +
-    (question ? 6 + (question.options?.length ?? 0) + Math.ceil(question.question.length / Math.max(10, cols - 4)) : 0);
-  const liveMaxRows = Math.max(3, rows - chromeRows);
+  const maxHistory = 50;
+  const visibleMessages = messages.slice(-maxHistory);
 
   return (
     <Box flexDirection="column">
-      <Static key={staticGen} items={staticItems}>
-        {(item) =>
-          item.kind === "logo" ? (
-            <Box key={item.key} flexDirection="column">
-              <Text color={color} bold>{art}</Text>
-              <Text dimColor>{sep}</Text>
-            </Box>
-          ) : (
-            <MessageView key={item.key} message={item.message} />
-          )
-        }
-      </Static>
+      <Text color={color} bold>{art}</Text>
+      <Text dimColor>{sep}</Text>
 
-      {messages.length === 0 && (
+      {visibleMessages.length === 0 && (
         <Text dimColor>Envie uma mensagem (Enter enviar | Ctrl+E pensamento | Ctrl+O modo | Ctrl+C sair)</Text>
       )}
+      {visibleMessages.map((m, i) => (
+        <MessageView key={i} message={m} />
+      ))}
       {streaming && liveText && (
         <Box flexDirection="column" marginBottom={1}>
-          <LiveResponse text={liveText} cols={cols} maxRows={liveMaxRows} />
+          <Text bold color="green">{"ia>"}</Text>
+          <MarkdownText>{liveText}</MarkdownText>
         </Box>
       )}
 

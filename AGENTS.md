@@ -42,7 +42,7 @@ Antes de dar uma tarefa por concluída: `bun run typecheck` e `bun test`.
 - **Dados por projeto**: use `getWorkspaceDataDir(cwd)`, que resolve a raiz do projeto. Não grave arquivos na pasta do usuário sem ele pedir.
 - **Argumentos do modelo não são confiáveis**: caminhos passam por `isPathBlockedSafe`, números por clamp.
 - **`render(..., { exitOnCtrlC: false })` em `App.tsx` é intencional**: sem isso, `Ctrl+C` fecha o app em vez de cancelar.
-- **O quadro dinâmico do Ink precisa ficar menor que o terminal**: o que já terminou vai para `<Static>`, e a resposta em streaming é cortada por `LiveResponse.tsx`. Se o quadro chega a `stdout.rows`, o Ink limpa e redesenha a tela a cada token e a TUI pisca (`tests/tui-flicker.test.ts`).
+- **A TUI desenha a conversa inteira no quadro dinâmico do Ink (escolha intencional)**: quando o quadro passa da altura do terminal, o Ink redesenha a tela toda a cada atualização. Em terminais com saída sincronizada (DEC 2026) isso não aparece; em terminais sem ela (ex.: VTE), pisca. Não troque por `<Static>`/corte da resposta sem o dono do projeto pedir.
 - **Repaint após redimensionar (`App.tsx`) é intencional**: o Ink sozinho deixa restos de quadros antigos quando o terminal refaz a quebra das linhas. `tests/tui-resize.test.ts` reproduz isso num emulador (xterm headless); mudanças de layout da TUI devem passar nele.
 - **Versão**: `package.json` e `src/version.ts` mudam juntos (`tests/version.test.ts` verifica).
 

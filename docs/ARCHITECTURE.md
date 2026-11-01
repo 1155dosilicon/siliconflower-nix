@@ -29,9 +29,9 @@ Saídas de ferramenta acima de 32 mil caracteres são truncadas (início e fim).
 
 Com o agente ocioso, `Ctrl+C` sai.
 
-**Renderização**: o logo e as mensagens finalizadas ficam num `<Static>` do Ink, que os imprime uma vez no scrollback e nunca os redesenha. O quadro dinâmico tem só a resposta em andamento, tarefas, pergunta, entrada e barra de status. Ele precisa ficar menor que a altura do terminal: quando o quadro chega a `stdout.rows`, o Ink limpa a tela e redesenha tudo a cada atualização, e a TUI pisca. Por isso `LiveResponse.tsx` limita a resposta em streaming às linhas que sobram e mostra só o final. O texto chega à TUI a cada 60 ms, e `enableSynchronizedOutput` (`terminal.ts`) envolve cada escrita em `ESC[?2026h`/`ESC[?2026l`.
+**Renderização**: o logo, as últimas 50 mensagens e a resposta em andamento (inteira) ficam no quadro dinâmico do Ink. Quando o quadro passa da altura do terminal, o Ink limpa a tela e redesenha tudo a cada atualização. `enableSynchronizedOutput` (`terminal.ts`) envolve cada escrita em `ESC[?2026h`/`ESC[?2026l`, e os terminais com saída sincronizada mostram cada quadro de uma vez, sem piscar; nos sem suporte (ex.: VTE), a tela pisca. O texto em streaming chega à TUI a cada 60 ms.
 
-**Redimensionamento**: o Ink 5 apaga "as N linhas do quadro anterior", mas o terminal já refez a quebra dessas linhas em outra quantidade de linhas, e sobram fragmentos. Por isso, 150 ms depois do último `resize`, a `App` atualiza a largura (o Ink desenha o quadro na nova largura). Depois de mais 50 ms (acima do throttle de 32 ms do Ink), ela chama `useStdout().write(ANSI_CLEAR_SCREEN)` e remonta o `<Static>` (nova `key`), que reimprime o logo e o histórico na nova largura. O logo (`ascii.ts`) escolhe a variante pela largura: completo, empilhado ou texto.
+**Redimensionamento**: o Ink 5 apaga "as N linhas do quadro anterior", mas o terminal já refez a quebra dessas linhas em outra quantidade de linhas, e sobram fragmentos. Por isso, 150 ms depois do último `resize`, a `App` atualiza a largura (o Ink desenha o quadro na nova largura). Em seguida chama `useStdout().write(ANSI_CLEAR_SCREEN)`. Esse `write` do Ink zera a contabilidade do quadro, limpa a tela e o scrollback e redesenha o quadro inteiro. O logo (`ascii.ts`) escolhe a variante pela largura: completo, empilhado ou texto.
 
 ## Provedores e raciocínio
 
