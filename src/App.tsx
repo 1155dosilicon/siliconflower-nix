@@ -9,14 +9,16 @@ import { loadSkills, readSkillContent, SKILL_TOOL, type Skill } from "./skills.j
 import { buildSystemPrompt, modeLabel, nextMode, type Mode } from "./modes.js";
 import { buildMemorySystemPrompt } from "./services/memory.js";
 import { onTodosChange } from "./todo.js";
-import { estimateTokens, formatTokenCount } from "./context.js";
+import { estimateTokens, estimateMessagesTokens, formatTokenCount } from "./context.js";
 import { MarkdownText } from "./MarkdownText.js";
 import { log, logFile } from "./logger.js";
 import type { AppConfig, ChatMessage, McpTool, ReasoningLevel, StreamEvent, TodoItem } from "./types.js";
 import { isToolAllowedInMode } from "./tool-policy.js";
 import { runHook } from "./core/hooks.js";
-import { clearScreen, restoreTerminal } from "./terminal.js";
+import { clearScreen, restoreTerminal, ANSI_CLEAR_SCREEN } from "./terminal.js";
 import { reasoningLabel, reasoningOptions } from "./reasoning.js";
+import { findProject } from "./project.js";
+import { basename } from "node:path";
 
 interface AppProps {
   config: AppConfig;
@@ -29,9 +31,18 @@ interface UIMessage {
   reasoning?: string;
 }
 
-const App: React.FC<AppProps> = ({ config, overrides }) => {
+interface PendingQuestion {
+  question: string;
+  options?: string[];
+  resolve: (answer: string) => void;
+  reject: (err: Error) => void;
+}
+
+const RESIZE_SETTLE_MS = 150;
+
+export const App: React.FC<AppProps> = ({ config, overrides }) => {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { stdout, write: writeToStdout } = useStdout();
 
   const [model] = useState(overrides.model ?? config.model);
   const [reasoning, setReasoning] = useState<ReasoningLevel>(overrides.reasoning ?? config.reasoning);
@@ -47,6 +58,15 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
   const [error, setError] = useState<string | null>(null);
   const [cols, setCols] = useState(stdout?.columns ?? 100);
   const [apiTokens, setApiTokens] = useState(0);
+  // Last memory/project prompt segment, so the token counter reflects what is really sent.
+  const [memoryPrompt, setMemoryPrompt] = useState("");
+  const [project, setProject] = useState(() => findProject(process.cwd()));
+  const [question, setQuestion] = useState<PendingQuestion | null>(null);
+  const questionRef = useRef<PendingQuestion | null>(null);
+  questionRef.current = question;
+  // Full API conversation (including tool calls and tool results), separate from the
+  // rendered UI messages, so the model keeps the context of what its tools did.
+  const historyRef = useRef<ChatMessage[]>([]);
   const mcpRef = useRef<McpManager | null>(null);
   const skillsRef = useRef<Skill[]>([]);
   const abortRef = useRef<AbortController | null>(null);
@@ -58,14 +78,37 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
     return onTodosChange((updated) => setTodosState([...updated]));
   }, []);
 
-  const { art, color } = renderLogo();
+  // Re-picked on every resize (cols state), so the logo never wraps in narrow windows.
+  const { art, color } = renderLogo(cols);
 
+  // Ink only erases "the N lines of the previous frame" on resize, but the terminal has
+  // already reflowed those lines into a different number of rows, so fragments of old
+  // frames pile up (e.g. a stacked logo under the full one). Once resizing settles, wipe
+  // the screen and repaint the whole frame.
+  const [repaintTick, setRepaintTick] = useState(0);
   useEffect(() => {
     if (!stdout) return;
-    const handler = () => setCols(stdout.columns);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const handler = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        setCols(stdout.columns);
+        setRepaintTick((t) => t + 1);
+      }, RESIZE_SETTLE_MS);
+    };
     stdout.on("resize", handler);
-    return () => { stdout.off("resize", handler); };
+    return () => {
+      if (timer) clearTimeout(timer);
+      stdout.off("resize", handler);
+    };
   }, [stdout]);
+
+  useEffect(() => {
+    if (repaintTick === 0) return;
+    // Ink's write(): resets its frame bookkeeping, writes our data (clear screen + scrollback,
+    // cursor home) and then redraws the full current frame from scratch.
+    writeToStdout(ANSI_CLEAR_SCREEN);
+  }, [repaintTick, writeToStdout]);
 
   useEffect(() => {
     const mcp = new McpManager();
@@ -76,6 +119,7 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
       if (cancelled) return;
       skillsRef.current = loaded;
       setSkills(loaded);
+      setMemoryPrompt(await buildMemorySystemPrompt(process.cwd()).catch(() => ""));
       await log("info", `siliconflower iniciado - model=${model}`);
       if (config.hooks) {
         await runHook("onSessionStart", config.hooks, { cwd: process.cwd() });
@@ -86,7 +130,13 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
         if (cancelled) return;
         setMcpCount(tools.length);
         await log("ok", `MCP conectado: ${mcp.serverCount()} servidores, ${tools.length} ferramentas`);
-        setStatus("pronto");
+        const failures = mcp.connectFailures();
+        if (failures.length) {
+          setError(`MCP: falha ao conectar ${failures.map((f) => f.server).join(", ")} (detalhes em siliconflower logs)`);
+          setStatus(`pronto (${failures.length} servidor(es) MCP com falha)`);
+        } else {
+          setStatus("pronto");
+        }
       } catch (e) {
         await log("error", `MCP indisponivel: ${String(e)}`);
         setStatus("MCP indisponivel");
@@ -133,6 +183,46 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
     }
   }, [streaming, exit]);
 
+  const askUser = useCallback(
+    (q: string, options: string[] | undefined, signal?: AbortSignal) =>
+      new Promise<string>((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error("operação cancelada"));
+        const onAbort = () => {
+          setQuestion(null);
+          reject(new Error("operação cancelada"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        setInput("");
+        setStatus("aguardando sua resposta...");
+        setQuestion({
+          question: q,
+          options,
+          resolve: (answer) => {
+            signal?.removeEventListener("abort", onAbort);
+            setQuestion(null);
+            setStatus("processando...");
+            resolve(answer);
+          },
+          reject,
+        });
+      }),
+    []
+  );
+
+  const answerQuestion = useCallback((raw: string) => {
+    const pending = questionRef.current;
+    if (!pending) return;
+    const text = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
+    if (!text) return;
+    // A bare number selects the corresponding option.
+    const n = Number(text);
+    const answer = pending.options && Number.isInteger(n) && n >= 1 && n <= pending.options.length
+      ? pending.options[n - 1]
+      : text;
+    setInput("");
+    pending.resolve(answer);
+  }, []);
+
   const allTools = useCallback((): McpTool[] => {
     const list: McpTool[] = [...builtinToolsAsMcp()];
     list.push({ server: "skill", name: SKILL_TOOL.name, description: SKILL_TOOL.description, inputSchema: SKILL_TOOL.inputSchema });
@@ -160,29 +250,30 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
       }
       if (isBuiltin(name)) {
         return runBuiltin(name, args, {
-          config,
+          // Carry CLI overrides (e.g. --model) so subagents use the same model.
+          config: { ...config, model },
           mode: modeRef.current,
           signal: abortRef.current?.signal,
+          askUser,
         });
       }
       const mcp = mcpRef.current;
       if (mcp) {
         try {
-          const result = await mcp.callTool(name, args);
-          return { result, isError: false };
+          return await mcp.callTool(name, args, abortRef.current?.signal);
         } catch (e) {
           return { result: String(e), isError: true };
         }
       }
       return { result: `tool not found: ${name}`, isError: true };
     },
-    [config]
+    [config, model, askUser]
   );
 
   const handleInputChange = useCallback((val: string) => {
     let clean = val.replace(/[\x00-\x1F\x7F]/g, "");
     if (Date.now() - lastCtrlRef.current < 250) {
-      clean = clean.replace(/[oOeEcC]$/i, "");
+      clean = clean.replace(/[oe]$/i, "");
     }
     setInput(clean);
   }, []);
@@ -198,19 +289,10 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
       setLiveText("");
       setStatus("pensando...");
 
-      // Pass the full history (not a hard slice) so compressHistory in llm.ts can make the
-      // token-aware compaction decision instead of losing everything before a fixed cutoff.
-      const history: ChatMessage[] = [
-        ...messages.map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          ...(m.role === "assistant" && m.reasoning ? { reasoning: m.reasoning } : {}),
-        })),
-        { role: "user" as const, content: cleanText },
-      ];
-
-      const memoryPrompt = await buildMemorySystemPrompt(process.cwd());
-      const systemPrompt = buildSystemPrompt(modeRef.current, config.system, skillsRef.current, memoryPrompt);
+      // Pass the full API history (including tool calls/results from earlier turns) so the
+      // model keeps that context; compressHistory in llm.ts applies the token budget.
+      const userMsg: ChatMessage = { role: "user", content: cleanText };
+      const history: ChatMessage[] = [...historyRef.current, userMsg];
       const controller = new AbortController();
       abortRef.current = controller;
 
@@ -218,8 +300,17 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
       let accThinking = "";
       let hadError = false;
       let assistantMsgAdded = false;
+      // Commits this turn to the API history exactly once.
+      const commitTurn = (turnMessages: ChatMessage[]) => {
+        historyRef.current = [...historyRef.current, userMsg, ...turnMessages];
+      };
 
       try {
+        const turnMemoryPrompt = await buildMemorySystemPrompt(process.cwd());
+        setMemoryPrompt(turnMemoryPrompt);
+        // The marker file may have been created mid-session (e.g. by the agent itself).
+        setProject(findProject(process.cwd()));
+        const systemPrompt = buildSystemPrompt(modeRef.current, config.system, skillsRef.current, turnMemoryPrompt);
         const gen = streamChat({
           config: { ...config, system: systemPrompt, model },
           messages: history,
@@ -254,7 +345,10 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
               await log("error", `Stream error: ${ev.message}`);
               if (!assistantMsgAdded) {
                 assistantMsgAdded = true;
-                setMessages((m) => [...m, { role: "assistant", content: `[Erro: ${ev.message}]` }]);
+                const partial = accText.trim();
+                const shown = partial ? `${partial}\n\n[Erro: ${ev.message}]` : `[Erro: ${ev.message}]`;
+                setMessages((m) => [...m, { role: "assistant", content: shown }]);
+                commitTurn([{ role: "assistant", content: shown }]);
               }
               break;
             case "done":
@@ -262,9 +356,10 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
                 const final = ev.content?.trim() || accText.trim();
                 const finalThinking = ev.reasoning?.trim() || accThinking.trim();
                 if (final) {
-                  assistantMsgAdded = true;
                   setMessages((m) => [...m, { role: "assistant", content: final, reasoning: finalThinking || undefined }]);
                 }
+                assistantMsgAdded = true;
+                commitTurn(ev.messages ?? (final ? [{ role: "assistant", content: final }] : []));
               }
               break;
           }
@@ -283,22 +378,28 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
         }
         if (!assistantMsgAdded) {
           assistantMsgAdded = true;
+          const shown = accText || `[${errMsg}]`;
           setMessages((m) => [
             ...m,
             {
               role: "assistant",
-              content: accText || `[${errMsg}]`,
+              content: shown,
               reasoning: accThinking || undefined,
             },
           ]);
+          // Partial tool calls of an interrupted turn are not kept (they could be left
+          // without their results); the visible text is enough context for the next turn.
+          commitTurn([{ role: "assistant", content: isAbort && accText ? `${accText}\n\n[interrompido pelo usuário]` : shown }]);
         }
       } finally {
+        questionRef.current?.reject(new Error("operação encerrada"));
+        setQuestion(null);
         setStreaming(false);
         setLiveText("");
         abortRef.current = null;
       }
     },
-    [config, model, reasoning, streaming, messages, allTools, executeTool]
+    [config, model, reasoning, streaming, allTools, executeTool]
   );
 
   useInput((input, key) => {
@@ -315,8 +416,8 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
   });
 
   const totalTools = builtinToolsAsMcp().length + 1 + mcpCount;
-  const systemTokens = estimateTokens(buildSystemPrompt(mode, config.system, skills));
-  const historyTokens = messages.reduce((acc, m) => acc + estimateTokens(m.content) + estimateTokens(m.reasoning ?? ""), 0);
+  const systemTokens = estimateTokens(buildSystemPrompt(mode, config.system, skills, memoryPrompt));
+  const historyTokens = estimateMessagesTokens(historyRef.current);
   const liveTokens = estimateTokens(input) + estimateTokens(liveText);
   const estimatedTotal = systemTokens + historyTokens + liveTokens;
   const totalTokens = Math.max(estimatedTotal, apiTokens);
@@ -372,18 +473,38 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
         </Box>
       )}
 
+      {question && (
+        <Box flexDirection="column" marginY={1} borderStyle="round" borderColor="magenta" paddingX={1}>
+          <Text bold color="magenta">Pergunta da IA:</Text>
+          <MarkdownText>{question.question}</MarkdownText>
+          {question.options?.map((opt, i) => (
+            <Text key={i}>
+              <Text color="yellow">{`  ${i + 1}. `}</Text>
+              {opt}
+            </Text>
+          ))}
+          <Text dimColor italic>
+            {question.options?.length ? "Digite o número de uma opção ou uma resposta livre e tecle Enter." : "Digite sua resposta e tecle Enter."}
+            {" (Ctrl+C cancela)"}
+          </Text>
+        </Box>
+      )}
+
       <Text dimColor>{sep}</Text>
       <Box>
         <Text color="magenta" bold>{"> "}</Text>
-        {!streaming ? (
+        {!streaming || question ? (
           <TextInput
             value={input}
             onChange={handleInputChange}
-            onSubmit={() => { if (input.trim()) send(input); }}
-            placeholder="digite para a LLM..."
+            onSubmit={() => {
+              if (question) answerQuestion(input);
+              else if (input.trim()) send(input);
+            }}
+            placeholder={question ? "sua resposta..." : "digite para a LLM..."}
           />
         ) : (
-          <Text dimColor italic>gerando resposta...</Text>
+          <Text dimColor italic>gerando resposta... (Ctrl+C cancela)</Text>
         )}
       </Box>
 
@@ -394,6 +515,10 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
         <Text><Text color="blue" bold>Mode:</Text> {modeLabel(mode)} </Text>
         <Text><Text color="yellow" bold>Tools:</Text> {totalTools} </Text>
         <Text><Text color="cyan" bold>Skills:</Text> {skills.length} </Text>
+        <Text>
+          <Text color="green" bold>Projeto:</Text>{" "}
+          {project ? `${basename(project.root)} (${basename(project.markerPath)})` : "nenhum (memória de projeto off)"}{" "}
+        </Text>
         <Text><Text color="red" bold>Tokens:</Text> {formatTokenCount(totalTokens)}</Text>
       </Box>
       <Text dimColor italic>{status} {totalTokens > 0 && `(${formatTokenCount(totalTokens)} tokens)`}</Text>
@@ -406,7 +531,9 @@ const App: React.FC<AppProps> = ({ config, overrides }) => {
 export async function startApp(config: AppConfig, overrides: { model?: string; reasoning?: ReasoningLevel; mode?: Mode }) {
   clearScreen();
   try {
-    const app = render(<App config={config} overrides={overrides} />);
+    // exitOnCtrlC must be off: with Ink's default, useInput never receives Ctrl+C, so the
+    // app would exit instead of cancelling the current response.
+    const app = render(<App config={config} overrides={overrides} />, { exitOnCtrlC: false });
     await app.waitUntilExit();
   } finally {
     restoreTerminal();

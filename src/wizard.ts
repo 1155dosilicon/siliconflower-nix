@@ -1,5 +1,5 @@
 import { select, input, password, editor, confirm } from "@inquirer/prompts";
-import { saveConfig, defaultPreset, loadConfig, configFile, configDir } from "./config.js";
+import { saveConfig, defaultPreset, loadConfig, loadStoredConfig, isValid, configFile, configDir } from "./config.js";
 import type { AppConfig, McpServerConfig, ReasoningLevel } from "./types.js";
 import { isXiaomiMimoEndpoint, reasoningOptions } from "./reasoning.js";
 
@@ -129,9 +129,10 @@ export async function runSetup(existing: AppConfig | null): Promise<AppConfig> {
 }
 
 export async function ensureConfig(): Promise<AppConfig> {
-  const existing = await loadConfig();
-  if (existing && existing.apiKey && existing.baseURL && existing.model) {
-    return existing;
+  const effective = await loadConfig();
+  if (effective && isValid(effective)) {
+    return effective;
   }
-  return runSetup(existing);
+  // Edit the stored file only, so environment overrides are never persisted.
+  return runSetup(await loadStoredConfig());
 }

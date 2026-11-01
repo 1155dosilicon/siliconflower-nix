@@ -48,9 +48,8 @@ export type StreamEvent =
   | { type: "tool_result"; id: string; name: string; result: string; isError: boolean }
   | { type: "usage"; totalTokens?: number; promptTokens?: number; completionTokens?: number }
   | { type: "error"; message: string }
-  | { type: "done"; content: string; reasoning: string }
-  | { type: "todo_update"; todos: TodoItem[] }
-  | { type: "question"; question: string; options?: string[] };
+  /** `messages` holds the messages produced in this turn (tool calls, tool results, final answer). */
+  | { type: "done"; content: string; reasoning: string; messages?: ChatMessage[] };
 
 export interface McpTool {
   server: string;

@@ -177,6 +177,7 @@ async function runSubagentExecution(opts: SubagentOptions, systemPrompt: string,
   ];
 
   let accumulatedContent = "";
+  let turnMessages: ChatMessage[] = [];
 
   try {
     await log("info", `[Subagente iniciado] [${opts.role || "general"}] ${opts.description}`);
@@ -197,7 +198,8 @@ async function runSubagentExecution(opts: SubagentOptions, systemPrompt: string,
           }
         }
         if (isBuiltin(name)) {
-          return runBuiltin(name, args, { config: opts.config });
+          // Propagate cancellation so Ctrl+C / kill also stops the subagent's commands.
+          return runBuiltin(name, args, { config: opts.config, signal: opts.signal });
         }
         return { result: `Ferramenta ${name} não disponível no subagente`, isError: true };
       },
@@ -208,13 +210,18 @@ async function runSubagentExecution(opts: SubagentOptions, systemPrompt: string,
         accumulatedContent += ev.text;
       } else if (ev.type === "done") {
         if (ev.content) accumulatedContent = ev.content;
+        turnMessages = ev.messages ?? [];
       } else if (ev.type === "error") {
         throw new Error(ev.message);
       }
     }
 
-    if (accumulatedContent) {
-      session.history.push({ role: "assistant", content: accumulatedContent });
+    // Keep the tool calls/results so follow-ups via send_subagent_message have full context,
+    // and always close the turn with an assistant message (no two consecutive user messages).
+    session.history.push(...turnMessages);
+    const last = session.history[session.history.length - 1];
+    if (!last || last.role !== "assistant" || last.toolCalls?.length) {
+      session.history.push({ role: "assistant", content: accumulatedContent || "(sem saída de texto)" });
     }
 
     await log("ok", `[Subagente concluído] ${opts.description}`);
@@ -222,6 +229,7 @@ async function runSubagentExecution(opts: SubagentOptions, systemPrompt: string,
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await log("error", `[Subagente erro] ${msg}`);
+    session.history.push({ role: "assistant", content: `[Erro: ${msg}]` });
     throw err;
   }
 }

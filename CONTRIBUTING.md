@@ -1,58 +1,38 @@
-# Contributing to Siliconflower
+# Contribuindo com o Siliconflower
 
-Thanks for your interest in contributing. This project is small and focused,
-so contributions tend to come in three shapes:
+O projeto é pequeno e focado. As contribuições costumam ser de três tipos:
 
-1. Bug reports and feature requests (open an issue first).
-2. Documentation fixes (PR directly).
-3. Source changes (PR; please read the guidelines below).
+1. Relatos de bug e pedidos de recurso: abra uma issue primeiro.
+2. Correções de documentação: abra o PR direto.
+3. Mudanças no código: abra um PR seguindo as orientações abaixo.
 
-## Development setup
+## Ambiente
 
-```powershell
+```bash
 git clone https://github.com/1155dosilicon/siliconflower-nix.git
 cd siliconflower-nix
 bun install
 bun run typecheck
+bun test
 bun run dev
 ```
 
-Requirements: Bun >= 1.3 (recommended) or Node >= 20 with `tsx`.
+Requisitos: Windows, Linux ou macOS/Unix, Bun >= 1.3 (recomendado) ou Node >= 20 com `tsx`.
 
-## Source layout
+O mapa do código, os comandos e as regras que já evitaram bugs estão em [AGENTS.md](AGENTS.md). A arquitetura detalhada está em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-- `src/index.tsx` -- CLI entry (commander).
-- `src/App.tsx` -- TUI (ink/React). Keep components small and pure when
-  possible.
-- `src/llm.ts` -- OpenAI-compatible streaming adapter. Keep the tool-call
-  loop provider-agnostic so a new backend is a variation of one function,
-  not a redesign of the loop.
-- `src/reasoning.ts` -- Provider-specific reasoning behavior. Keep endpoint
-  detection and reasoning option selection here.
-- `src/tools.ts` -- Native tool implementations. Validate input paths with
-  the helpers in `src/tools.ts` and `src/fs-util.ts`; never trust model output.
-- `src/mcp.ts` -- MCP client lifecycle. Treat MCP failures as warnings,
-  not fatal errors -- the agent should still run with native tools.
-- `src/skills.ts`, `src/modes.ts`, `src/wizard.ts` -- user-facing config and
-  prompts. New user-facing strings should be in Portuguese (pt-BR).
-- `src/logger.ts` -- Append-only log. Never throw from `log()`.
+## Estilo
 
-## Style
+- TypeScript em modo strict. Sem `any`, exceto ao envolver respostas de SDK.
+- Textos para o usuário e prompts em pt-BR. Logs, campos de protocolo e saídas lidas por máquina em ASCII.
+- Unicode decorativo só nos indicadores de status existentes da TUI e no logo. Mensagens operacionais precisam fazer sentido mesmo num terminal que não mostra esses símbolos.
+- Prefira `void promise.catch(...)` a caminhos de promise sem tratamento. `log()` nunca deve lançar exceção.
+- Saída do modelo não é confiável: valide caminhos e argumentos.
 
-- TypeScript strict mode. No `any` unless wrapping an SDK response.
-- Keep decorative Unicode limited to existing TUI status indicators and the
-  logo. New operational messages should remain understandable if a terminal
-  cannot render those glyphs.
-- Prefer plain ASCII in logs, protocol fields and machine-readable output.
-- Prefer `void promise.catch(...)` over unhandled promise paths.
+## Fluxo de pull request
 
-## Pull request workflow
-
-1. Fork and create a feature branch off `main`.
-2. Run `bun run typecheck`. CI must pass.
-3. Add or update tests for the changed behavior where reasonable
-   (the project keeps tests light; focus on happy-path smoke tests).
-4. Include a one-line entry in `CHANGELOG.md` under an `Unreleased`
-   section.
-5. Open the PR; the description should state motivation, the change, and
-   any backwards-compatibility impact.
+1. Faça um fork e crie uma branch a partir de `main`.
+2. `bun run typecheck` e `bun test` precisam passar.
+3. Adicione ou atualize testes do comportamento alterado. Correções de bug ganham um teste em `tests/regressions.test.ts`.
+4. Registre a mudança em `CHANGELOG.md`, seção `[Unreleased]`, com **uma linha** por item.
+5. Na descrição do PR, explique a motivação, a mudança e qualquer impacto em compatibilidade.

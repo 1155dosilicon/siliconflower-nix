@@ -1,4 +1,4 @@
-# Instala o binário standalone do Siliconflower no PATH do usuário (sem admin).
+﻿# Instala o binário standalone do Siliconflower no PATH do usuário (sem admin).
 # Copia dist/siliconflower.exe para $InstallDir e adiciona ao PATH (User scope).
 #
 # Uso:

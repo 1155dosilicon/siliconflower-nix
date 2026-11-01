@@ -49,7 +49,12 @@ export function buildOpenAIMessages(
   const preserveReasoningContent = isXiaomiMimoEndpoint(config.baseURL);
   const out: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
   if (config.system) out.push({ role: "system", content: config.system });
+  // compressHistory may drop the assistant(tool_calls) message that a tool result answers;
+  // an orphan tool message makes the API reject the request, so skip those.
+  const knownCallIds = new Set<string>();
   for (const m of messages) {
+    if (m.role === "assistant" && m.toolCalls) for (const c of m.toolCalls) knownCallIds.add(c.id);
+    if (m.role === "tool" && m.toolCallId && !knownCallIds.has(m.toolCallId)) continue;
     if (m.role === "user") {
       out.push({ role: "user", content: m.content });
     } else if (m.role === "assistant") {
@@ -124,6 +129,18 @@ async function withConnectTimeout<T>(promise: Promise<T>, signal?: AbortSignal, 
   });
 }
 
+/** Official OpenAI endpoints reject `max_tokens` for reasoning models (o-series, gpt-5). */
+export function isOfficialOpenAIEndpoint(baseURL: string): boolean {
+  try {
+    return new URL(baseURL).hostname.toLowerCase() === "api.openai.com";
+  } catch {
+    return false;
+  }
+}
+
+const MAX_OUTPUT_TOKENS = 16384;
+export const MAX_STEPS = 50;
+
 async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
   const { config, messages, tools, reasoning, executeTool, signal } = opts;
   const client = new OpenAI({ baseURL: config.baseURL, apiKey: config.apiKey });
@@ -131,15 +148,23 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
   const isXiaomiMimo = isXiaomiMimoEndpoint(config.baseURL);
   const effort = !isXiaomiMimo && reasoning !== "none" ? reasoning : undefined;
   let supportsEffort = true;
+  let tokenParam: "max_tokens" | "max_completion_tokens" = isOfficialOpenAIEndpoint(config.baseURL)
+    ? "max_completion_tokens"
+    : "max_tokens";
 
-  const compressed = compressHistory(messages);
-  let working = buildOpenAIMessages(config, compressed);
+  // `history` is the full conversation; `turn` collects only the messages produced in this
+  // call (assistant tool calls, tool results, final answer) so the caller can persist them.
+  // The history is re-compacted before every request: a long tool loop can otherwise grow
+  // far beyond the context budget.
+  const history: ChatMessage[] = [...messages];
+  const turn: ChatMessage[] = [];
   let finalContent = "";
   let finalThinking = "";
 
   void log("info", `LLM request: model=${config.model}, tools=${apiTools.length}, reasoning=${reasoning}`);
 
-  for (let step = 0; step < 50; step++) {
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const working = buildOpenAIMessages(config, compressHistory(history));
     let content = "";
     let thinking = "";
     const pendingCalls: {
@@ -163,7 +188,7 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
           model: config.model,
           messages: working,
           stream: true,
-          max_tokens: 16384,
+          [tokenParam]: MAX_OUTPUT_TOKENS,
           stream_options: { include_usage: true },
           ...(withEffort && effort ? { reasoning_effort: effort } : {}),
           ...(isXiaomiMimo ? { thinking: { type: reasoning === "none" ? "disabled" : "enabled" } } : {}),
@@ -173,18 +198,28 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
       );
     };
 
-    let stream: Awaited<ReturnType<typeof client.chat.completions.create>>;
-    try {
-      void log("info", `LLM step ${step}: conectando (timeout=${STREAM_CONNECT_TIMEOUT_MS / 1000}s)`);
-      stream = await withConnectTimeout(makeRequest(supportsEffort), signal, () => requestController?.abort());
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (supportsEffort && effort && /reasoning/i.test(msg)) {
-        supportsEffort = false;
-        stream = await withConnectTimeout(makeRequest(false), signal, () => requestController?.abort()); // retry without reasoning_effort
-      } else {
-        detachRequestAbort();
-        throw err;
+    let stream: Awaited<ReturnType<typeof client.chat.completions.create>> | undefined;
+    void log("info", `LLM step ${step}: conectando (timeout=${STREAM_CONNECT_TIMEOUT_MS / 1000}s)`);
+    // Providers differ in which optional parameters they accept. Each rejected parameter
+    // is adjusted at most once and remembered for the following steps.
+    for (let attempt = 0; !stream; attempt++) {
+      try {
+        stream = await withConnectTimeout(makeRequest(supportsEffort), signal, () => requestController?.abort());
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < 3 && supportsEffort && effort && /reasoning/i.test(msg)) {
+          supportsEffort = false;
+          void log("warn", "Provedor rejeitou reasoning_effort; repetindo sem ele");
+        } else if (attempt < 3 && tokenParam === "max_tokens" && /max_tokens/.test(msg) && /max_completion_tokens/.test(msg)) {
+          tokenParam = "max_completion_tokens";
+          void log("warn", "Provedor exige max_completion_tokens; repetindo");
+        } else if (attempt < 3 && tokenParam === "max_completion_tokens" && /max_completion_tokens/.test(msg) && /unsupported|unknown|unrecognized|not supported|invalid/i.test(msg)) {
+          tokenParam = "max_tokens";
+          void log("warn", "Provedor não aceita max_completion_tokens; repetindo com max_tokens");
+        } else {
+          detachRequestAbort();
+          throw err;
+        }
       }
     }
     void log("info", `LLM step ${step}: stream conectado`);
@@ -276,21 +311,27 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
         // O modelo sinalizou tool_calls mas nenhum foi parseado — log para diagnóstico
         void log("warn", `LLM step ${step}: finish_reason=tool_calls mas 0 calls parseados. argBuffers raw: ${JSON.stringify(Object.fromEntries(argBuffers))}`);
       }
-      yield { type: "done", content: finalContent, reasoning: finalThinking };
+      if (content || thinking) {
+        turn.push({ role: "assistant", content, ...(thinking ? { reasoning: thinking } : {}) });
+      }
+      yield { type: "done", content: finalContent, reasoning: finalThinking, messages: turn };
       return;
     }
 
     // Record the assistant tool-call message and execute.
-    working.push({
+    const assistantMsg: ChatMessage = {
       role: "assistant",
       content: content || "",
-      tool_calls: pendingCalls.map((c) => ({
+      toolCalls: pendingCalls.map((c) => ({
         id: c.id,
         type: "function" as const,
         function: { name: c.name, arguments: c.args },
       })),
-      ...(isXiaomiMimo ? { reasoning_content: thinking } : {}),
-    } as OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam);
+      // MiMo requires reasoning_content on the assistant message preceding tool results.
+      ...(isXiaomiMimo ? { reasoning: thinking } : {}),
+    };
+    history.push(assistantMsg);
+    turn.push(assistantMsg);
 
     void log("info", `LLM step ${step}: executando ${pendingCalls.length} tool(s): ${pendingCalls.map(c => c.name).join(", ")}`);
 
@@ -315,16 +356,17 @@ async function* streamOpenAI(opts: ChatOptions): AsyncGenerator<StreamEvent> {
       }
       void log(isError ? "warn" : "info", `LLM step ${step}: <- ${call.name} isError=${isError} result=${result.slice(0, 200)}`);
       yield { type: "tool_result", id: call.id, name: call.name, result, isError };
-      working.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: result,
-      } as OpenAI.Chat.Completions.ChatCompletionToolMessageParam);
+      const toolMsg: ChatMessage = { role: "tool", toolCallId: call.id, toolName: call.name, content: result };
+      history.push(toolMsg);
+      turn.push(toolMsg);
     }
-    void log("info", `LLM step ${step}: working messages agora: ${working.length}`);
+    void log("info", `LLM step ${step}: histórico agora: ${history.length} mensagens`);
     // loop continues: model sees tool results and may respond or call again.
   }
 
-  // If we exhausted all steps without a done event, yield one with accumulated content
-  yield { type: "done", content: finalContent || "", reasoning: finalThinking || "" };
+  // Step budget exhausted: tell the user instead of ending silently.
+  const notice = `[Limite de ${MAX_STEPS} passos de ferramentas atingido nesta mensagem. Envie "continue" para prosseguir.]`;
+  finalContent += (finalContent ? "\n\n" : "") + notice;
+  yield { type: "text", text: notice };
+  yield { type: "done", content: finalContent, reasoning: finalThinking, messages: turn };
 }

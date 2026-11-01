@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { createHash } from "node:crypto";
 import type { McpServerConfig, McpTool } from "./types.js";
 import { APP_VERSION } from "./version.js";
+import { log } from "./logger.js";
 
 interface ConnectedServer {
   name: string;
@@ -12,6 +13,12 @@ interface ConnectedServer {
 }
 
 const MCP_CONNECT_TIMEOUT_MS = 20_000;
+const MCP_CALL_TIMEOUT_MS = 120_000;
+
+export interface McpConnectFailure {
+  server: string;
+  error: string;
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, serverName: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -27,20 +34,32 @@ function withTimeout<T>(promise: Promise<T>, ms: number, serverName: string): Pr
 
 export class McpManager {
   private servers = new Map<string, ConnectedServer>();
+  private failures: McpConnectFailure[] = [];
 
+  /**
+   * Connects every configured server. Failures never throw: they are logged to the log
+   * file and exposed via connectFailures() (writing to stderr would corrupt the Ink TUI).
+   */
   async connectAll(config: Record<string, McpServerConfig> | undefined): Promise<McpTool[]> {
+    this.failures = [];
     if (!config) return [];
     const entries = Object.entries(config);
     const results = await Promise.allSettled(
       entries.map(async ([name, cfg]) => this.connect(name, cfg))
     );
-    results.forEach((r, i) => {
+    for (const [i, r] of results.entries()) {
       if (r.status === "rejected") {
-        const name = entries[i]?.[0] ?? "?";
-        process.stderr.write(`\n[MCP] falha ao conectar "${name}": ${String(r.reason)}\n`);
+        const server = entries[i]?.[0] ?? "?";
+        const error = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        this.failures.push({ server, error });
+        await log("error", `[MCP] falha ao conectar "${server}": ${error}`);
       }
-    });
+    }
     return this.allTools();
+  }
+
+  connectFailures(): McpConnectFailure[] {
+    return [...this.failures];
   }
 
   private async connect(name: string, cfg: McpServerConfig): Promise<void> {
@@ -101,7 +120,7 @@ export class McpManager {
     for (const s of this.servers.values()) {
       for (const tool of s.tools) {
         if (seen.has(tool.name)) {
-          process.stderr.write(`\n[MCP] ferramenta qualificada duplicada ignorada: "${tool.name}"\n`);
+          void log("warn", `[MCP] ferramenta qualificada duplicada ignorada: "${tool.name}"`);
           continue;
         }
         seen.add(tool.name);
@@ -111,16 +130,25 @@ export class McpManager {
     return out;
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<{ result: string; isError: boolean }> {
     for (const s of this.servers.values()) {
       const tool = s.tools.find((t) => t.name === name);
       if (!tool) continue;
-      const res = await s.client.callTool({ name: tool.originalName ?? tool.name, arguments: args });
+      const res = await s.client.callTool(
+        { name: tool.originalName ?? tool.name, arguments: args },
+        undefined,
+        { signal, timeout: MCP_CALL_TIMEOUT_MS }
+      );
       const content = (res.content as unknown[]) ?? [];
       const text = content
         .map((c) => (c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : JSON.stringify(c)))
         .join("\n");
-      return text || "(empty content)";
+      // MCP servers report tool failures in-band via `isError`, not by rejecting the call.
+      return { result: text || "(empty content)", isError: res.isError === true };
     }
     throw new Error(`tool not found: ${name}`);
   }

@@ -2,6 +2,20 @@ import { log } from "../logger.js";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: " ",
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  mdash: "—",
+  ndash: "–",
+  copy: "©",
+  reg: "®",
+  hellip: "…",
+};
+
 /**
  * Converts raw HTML into clean readable Markdown/text.
  */
@@ -65,18 +79,14 @@ export function htmlToMarkdown(html: string): string {
   text = text.replace(/<[^>]+>/g, " ");
 
   // Decode common HTML entities
-  text = text.replace(/&nbsp;/gi, " ");
-  text = text.replace(/&amp;/gi, "&");
-  text = text.replace(/&lt;/gi, "<");
-  text = text.replace(/&gt;/gi, ">");
-  text = text.replace(/&quot;/gi, '"');
-  text = text.replace(/&#39;|&apos;/gi, "'");
-  text = text.replace(/&mdash;/gi, "—");
-  text = text.replace(/&ndash;/gi, "–");
-  text = text.replace(/&copy;/gi, "©");
-  text = text.replace(/&reg;/gi, "®");
-  text = text.replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)));
-  text = text.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  // Single pass so "&amp;lt;" becomes the literal "&lt;" instead of being decoded twice.
+  text = text.replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);/g, (entity, body: string) => {
+    if (body[0] === "#") {
+      const code = body[1] === "x" || body[1] === "X" ? parseInt(body.slice(2), 16) : Number(body.slice(1));
+      return Number.isInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? entity;
+  });
 
   // Clean up excess whitespace and blank lines
   const lines = text.split("\n").map((line) => line.trim());
@@ -142,7 +152,11 @@ export async function webFetch(
       }
 
       const contentType = response.headers.get("content-type") || "";
-      const { text: rawText, truncated } = await readResponseTextLimited(response, maxChars, controller.signal);
+      const isHtml = contentType.includes("html");
+      // maxChars bounds the *converted* output. Raw HTML is mostly <head>, scripts and
+      // navigation, so cutting it at maxChars would drop the actual page content.
+      const rawLimit = isHtml ? Math.max(RAW_HTML_LIMIT, maxChars) : maxChars;
+      const { text: rawText, truncated } = await readResponseTextLimited(response, rawLimit, controller.signal);
 
       let extractedTitle = "";
       const matchTitle = /<title\b[^>]*>(.*?)<\/title>/gis.exec(rawText);
@@ -150,9 +164,9 @@ export async function webFetch(
         extractedTitle = matchTitle[1].replace(/<[^>]+>/g, "").trim();
       }
 
-      let markdown = contentType.includes("html") ? htmlToMarkdown(rawText) : rawText;
+      let markdown = isHtml ? htmlToMarkdown(rawText) : rawText;
 
-      if (truncated || markdown.length > maxChars) {
+      if ((truncated && !isHtml) || markdown.length > maxChars) {
         markdown = markdown.slice(0, maxChars) + `\n\n... (conteúdo truncado para ${maxChars} caracteres)`;
       }
 
@@ -176,6 +190,8 @@ export async function webFetch(
     };
   }
 }
+
+const RAW_HTML_LIMIT = 3_000_000;
 
 function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
   return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value!))) : fallback;
@@ -213,12 +229,31 @@ async function assertPublicUrl(url: URL): Promise<void> {
   }
 }
 
+/**
+ * Extracts the embedded IPv4 address from IPv4-mapped (::ffff:a.b.c.d / ::ffff:7f00:1),
+ * IPv4-compatible (::a.b.c.d) and NAT64 (64:ff9b::/96) IPv6 forms. WHATWG URL serializes
+ * `[::ffff:127.0.0.1]` as `[::ffff:7f00:1]`, so the hex form must be handled too.
+ */
+function embeddedIPv4(ipv6: string): string | undefined {
+  const m = ipv6.match(/^(?:::ffff:|::|64:ff9b::)(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/);
+  if (!m) return undefined;
+  if (m[1]) return m[1];
+  const hi = parseInt(m[2], 16);
+  const lo = parseInt(m[3], 16);
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
 export function isPrivateAddress(address: string): boolean {
   const normalized = address.toLowerCase();
-  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd")) return true;
-  if (/^fe[89ab]/.test(normalized)) return true;
-  const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-  const ipv4 = mapped ?? (isIP(normalized) === 4 ? normalized : undefined);
+  const version = isIP(normalized);
+  if (version === 6) {
+    if (normalized === "::1" || normalized === "::") return true;
+    if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true; // Unique local (RFC 4193)
+    if (/^fe[89ab]/.test(normalized)) return true; // Link-local
+    if (normalized.startsWith("ff")) return true; // Multicast
+  }
+  const mapped = version === 6 ? embeddedIPv4(normalized) : undefined;
+  const ipv4 = mapped ?? (version === 4 ? normalized : undefined);
   if (!ipv4) return false;
   const [a, b, c] = ipv4.split(".").map(Number);
   return (

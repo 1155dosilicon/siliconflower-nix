@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { globToRegex } from "./glob-util.js";
+import { IGNORED_SOURCE_DIRS } from "./fs-util.js";
 
 interface GrepOptions {
   basePath: string;
@@ -15,17 +16,6 @@ interface GrepMatch {
   content: string;
 }
 
-const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  ".next",
-  "coverage",
-  "bin",
-  ".vscode",
-  ".idea",
-]);
 
 function matchesGlob(relPath: string, filename: string, pattern?: string): boolean {
   if (!pattern || pattern === "*") return true;
@@ -61,7 +51,7 @@ export async function searchContent(opts: GrepOptions): Promise<GrepMatch[]> {
       const fullPath = join(dir, entry.name);
 
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
+        if (!IGNORED_SOURCE_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
           await walk(fullPath);
         }
       } else if (entry.isFile()) {
@@ -76,6 +66,8 @@ export async function searchContent(opts: GrepOptions): Promise<GrepMatch[]> {
           if (st.size > 2 * 1024 * 1024) continue; // Skip files > 2MB
 
           const content = await readFile(fullPath, "utf8");
+          // NUL bytes in the first 8 KB: binary file, matches would be garbage.
+          if (content.slice(0, 8192).includes("\0")) continue;
           const lines = content.split(/\r?\n/);
 
           for (let i = 0; i < lines.length; i++) {

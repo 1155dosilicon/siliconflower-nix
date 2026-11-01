@@ -34,14 +34,37 @@ export async function configExists(): Promise<boolean> {
   }
 }
 
+/**
+ * Effective runtime config: config.json with SILICONFLOWER_API_KEY / _BASE_URL / _MODEL
+ * applied on top. Never pass the result to saveConfig (it would persist the env values).
+ */
 export async function loadConfig(): Promise<AppConfig | null> {
+  return readConfigFile(true);
+}
+
+/** config.json exactly as stored (no environment overrides); use it for editing/saving. */
+export async function loadStoredConfig(): Promise<AppConfig | null> {
+  return readConfigFile(false);
+}
+
+async function readConfigFile(applyEnv: boolean): Promise<AppConfig | null> {
   try {
     const raw = await readFile(CONFIG_FILE, "utf8");
     const data = JSON.parse(raw);
-    return normalize(data);
+    return normalize(data, { applyEnv });
   } catch {
     return null;
   }
+}
+
+/** Applies the SILICONFLOWER_* environment overrides to an already normalized config. */
+export function applyEnvOverrides(config: AppConfig): AppConfig {
+  return {
+    ...config,
+    apiKey: process.env.SILICONFLOWER_API_KEY?.trim() || config.apiKey,
+    baseURL: process.env.SILICONFLOWER_BASE_URL?.trim() || config.baseURL,
+    model: process.env.SILICONFLOWER_MODEL?.trim() || config.model,
+  };
 }
 
 export async function saveConfig(config: AppConfig): Promise<void> {
@@ -49,10 +72,12 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
 }
 
-export function normalize(data: Partial<AppConfig>): AppConfig {
-  const apiKey = (process.env.SILICONFLOWER_API_KEY || data.apiKey || "").trim();
-  const baseURL = (process.env.SILICONFLOWER_BASE_URL || data.baseURL || "").trim();
-  const model = (process.env.SILICONFLOWER_MODEL || data.model || "").trim();
+export function normalize(data: Partial<AppConfig>, opts: { applyEnv?: boolean } = {}): AppConfig {
+  const applyEnv = opts.applyEnv ?? true;
+  const env = (name: string) => (applyEnv ? process.env[name]?.trim() : undefined);
+  const apiKey = (env("SILICONFLOWER_API_KEY") || data.apiKey || "").trim();
+  const baseURL = (env("SILICONFLOWER_BASE_URL") || data.baseURL || "").trim();
+  const model = (env("SILICONFLOWER_MODEL") || data.model || "").trim();
   const reasoning = data.reasoning && REASONING_LEVELS.includes(data.reasoning) ? data.reasoning : "high";
   
   let mode: Mode = "programação";
