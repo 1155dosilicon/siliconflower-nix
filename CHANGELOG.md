@@ -6,8 +6,10 @@ Todas as mudanças relevantes ficam registradas aqui. O formato segue o
 
 ## [Unreleased]
 
+### Changed
+- TUI volta a desenhar a conversa inteira (logo, histórico e resposta completa em streaming) no quadro dinâmico; o `<Static>` e o corte da resposta em andamento (`src/LiveResponse.tsx`) foram removidos. Em terminais sem saída sincronizada (ex.: VTE) a tela pisca ao gerar respostas longas.
+
 ### Fixed
-- TUI piscava ao gerar respostas: com o logo e o histórico dentro do quadro dinâmico do Ink, o quadro passava da altura do terminal e o Ink limpava e redesenhava a tela inteira a cada token. Logo e mensagens finalizadas agora vão para `<Static>` (impressos uma vez no scrollback) e a resposta em andamento mostra só o final que cabe na tela (`src/LiveResponse.tsx`). Teste: `tests/tui-flicker.test.ts`.
 - O texto em streaming é repassado à TUI no máximo a cada 60 ms, em vez de a cada pedaço recebido.
 - Cada quadro é enviado entre marcadores de saída sincronizada (DEC 2026), para os terminais com suporte desenharem tudo de uma vez; `SILICONFLOWER_NO_SYNC_OUTPUT=1` desativa.
 
