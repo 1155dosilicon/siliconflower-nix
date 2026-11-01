@@ -2,6 +2,9 @@ import { describe, expect, test, beforeEach } from "bun:test";
 import {
   ANSI_CLEAR_SCREEN,
   ANSI_SHOW_CURSOR,
+  ANSI_SYNC_BEGIN,
+  ANSI_SYNC_END,
+  enableSynchronizedOutput,
   clearScreen,
   restoreTerminal,
 } from "../src/terminal.js";
@@ -47,5 +50,31 @@ describe("terminal screen manager", () => {
     const cleared = clearScreen({ stream: mockStream, force: true });
     expect(cleared).toBe(true);
     expect(mockOutput.join("")).toContain(ANSI_CLEAR_SCREEN);
+  });
+});
+
+describe("enableSynchronizedOutput", () => {
+  const fakeStream = (isTTY: boolean) => {
+    const out: string[] = [];
+    const stream = { isTTY, write(d: string) { out.push(d); return true; } } as unknown as NodeJS.WriteStream;
+    return { stream, out };
+  };
+
+  test("wraps each write in DEC 2026 markers and can be undone", () => {
+    const { stream, out } = fakeStream(true);
+    const original = stream.write;
+    const disable = enableSynchronizedOutput({ stream });
+    stream.write("frame");
+    disable();
+    stream.write("plain");
+    expect(out).toEqual([`${ANSI_SYNC_BEGIN}frame${ANSI_SYNC_END}`, "plain"]);
+    expect(stream.write).toBe(original);
+  });
+
+  test("does nothing when the stream is not a TTY", () => {
+    const { stream, out } = fakeStream(false);
+    enableSynchronizedOutput({ stream })();
+    stream.write("x");
+    expect(out).toEqual(["x"]);
   });
 });

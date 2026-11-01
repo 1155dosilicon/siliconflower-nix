@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
-import { render, Box, Text, useApp, useInput, useStdout } from "ink";
+import { render, Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { renderLogo } from "./ascii.js";
 import { streamChat } from "./llm.js";
@@ -11,11 +11,12 @@ import { buildMemorySystemPrompt } from "./services/memory.js";
 import { onTodosChange } from "./todo.js";
 import { estimateTokens, estimateMessagesTokens, formatTokenCount } from "./context.js";
 import { MarkdownText } from "./MarkdownText.js";
+import { LiveResponse } from "./LiveResponse.js";
 import { log, logFile } from "./logger.js";
 import type { AppConfig, ChatMessage, McpTool, ReasoningLevel, StreamEvent, TodoItem } from "./types.js";
 import { isToolAllowedInMode } from "./tool-policy.js";
 import { runHook } from "./core/hooks.js";
-import { clearScreen, restoreTerminal, ANSI_CLEAR_SCREEN } from "./terminal.js";
+import { clearScreen, restoreTerminal, enableSynchronizedOutput, ANSI_CLEAR_SCREEN } from "./terminal.js";
 import { reasoningLabel, reasoningOptions } from "./reasoning.js";
 import { findProject } from "./project.js";
 import { basename } from "node:path";
@@ -39,6 +40,26 @@ interface PendingQuestion {
 }
 
 const RESIZE_SETTLE_MS = 150;
+// Streamed text is pushed to the UI at most this often (the MarkdownText re-parse and the
+// Ink frame diff are paid per update, not per token).
+const LIVE_TEXT_FLUSH_MS = 60;
+// Longer than Ink's 32 ms render throttle, so the frame at the new width is already on
+// screen (and is Ink's lastOutput) when the screen is wiped.
+const REPAINT_DELAY_MS = 50;
+
+type StaticItem = { kind: "logo"; key: string } | { kind: "message"; key: string; message: UIMessage };
+
+const MessageView: React.FC<{ message: UIMessage }> = ({ message: m }) => (
+  <Box flexDirection="column" marginBottom={1}>
+    <Text bold color={m.role === "user" ? "cyan" : "green"}>
+      {m.role === "user" ? "voce>" : "ia>"}
+    </Text>
+    {m.role === "assistant" ? <MarkdownText>{m.content}</MarkdownText> : <Text>{m.content}</Text>}
+    {m.reasoning && (
+      <Text dimColor italic>{"  thinking: " + m.reasoning.slice(0, 200) + (m.reasoning.length > 200 ? "..." : "")}</Text>
+    )}
+  </Box>
+);
 
 export const App: React.FC<AppProps> = ({ config, overrides }) => {
   const { exit } = useApp();
@@ -57,6 +78,7 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
   const [todos, setTodosState] = useState<TodoItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [cols, setCols] = useState(stdout?.columns ?? 100);
+  const [rows, setRows] = useState(stdout?.rows ?? 30);
   const [apiTokens, setApiTokens] = useState(0);
   // Last memory/project prompt segment, so the token counter reflects what is really sent.
   const [memoryPrompt, setMemoryPrompt] = useState("");
@@ -83,8 +105,13 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
 
   // Ink only erases "the N lines of the previous frame" on resize, but the terminal has
   // already reflowed those lines into a different number of rows, so fragments of old
-  // frames pile up (e.g. a stacked logo under the full one). Once resizing settles, wipe
-  // the screen and repaint the whole frame.
+  // frames pile up (e.g. a stacked logo under the full one). Once resizing settles:
+  //  1. cols/rows update, so Ink draws the live frame at the new width;
+  //  2. the screen and scrollback are wiped through Ink's write() (which then redraws that
+  //     frame, keeping its line bookkeeping right);
+  //  3. <Static> (logo + finished messages) is remounted, so Ink reprints the whole
+  //     scrollback at the new width above the live frame.
+  const [staticGen, setStaticGen] = useState(0);
   const [repaintTick, setRepaintTick] = useState(0);
   useEffect(() => {
     if (!stdout) return;
@@ -93,6 +120,7 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         setCols(stdout.columns);
+        setRows(stdout.rows);
         setRepaintTick((t) => t + 1);
       }, RESIZE_SETTLE_MS);
     };
@@ -105,9 +133,11 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
 
   useEffect(() => {
     if (repaintTick === 0) return;
-    // Ink's write(): resets its frame bookkeeping, writes our data (clear screen + scrollback,
-    // cursor home) and then redraws the full current frame from scratch.
-    writeToStdout(ANSI_CLEAR_SCREEN);
+    const timer = setTimeout(() => {
+      writeToStdout(ANSI_CLEAR_SCREEN);
+      setStaticGen((g) => g + 1);
+    }, REPAINT_DELAY_MS);
+    return () => clearTimeout(timer);
   }, [repaintTick, writeToStdout]);
 
   useEffect(() => {
@@ -298,6 +328,14 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
 
       let accText = "";
       let accThinking = "";
+      let liveTimer: ReturnType<typeof setTimeout> | undefined;
+      const scheduleLiveText = () => {
+        if (liveTimer) return;
+        liveTimer = setTimeout(() => {
+          liveTimer = undefined;
+          setLiveText(accText);
+        }, LIVE_TEXT_FLUSH_MS);
+      };
       let hadError = false;
       let assistantMsgAdded = false;
       // Commits this turn to the API history exactly once.
@@ -328,7 +366,7 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
               break;
             case "text":
               accText += ev.text;
-              setLiveText(accText);
+              scheduleLiveText();
               break;
             case "tool_call":
               setStatus(`🔨 ${ev.name}...`);
@@ -392,6 +430,7 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
           commitTurn([{ role: "assistant", content: isAbort && accText ? `${accText}\n\n[interrompido pelo usuário]` : shown }]);
         }
       } finally {
+        if (liveTimer) clearTimeout(liveTimer);
         questionRef.current?.reject(new Error("operação encerrada"));
         setQuestion(null);
         setStreaming(false);
@@ -423,36 +462,45 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
   const totalTokens = Math.max(estimatedTotal, apiTokens);
 
   const sep = "-".repeat(Math.min(cols - 2, 80));
-  const maxHistory = 50;
-  const visibleMessages = messages.slice(-maxHistory);
+  // Logo and finished messages go to <Static>: Ink prints them once into the scrollback and
+  // never redraws them. Keeping them in the live frame made it taller than the terminal,
+  // and then Ink clears and repaints the whole screen on every streamed token (flicker).
+  const staticItems: StaticItem[] = [
+    { kind: "logo", key: "logo" },
+    ...messages.map((m, i) => ({ kind: "message" as const, key: `m${i}`, message: m })),
+  ];
+
+  // Rows of the live frame other than the streamed text (separators, input, status bar,
+  // log line, error, to-do list, question box), estimated on the high side.
+  const statusBarRows = cols < 100 ? 3 : 2;
+  const chromeRows =
+    9 + statusBarRows +
+    (error ? Math.ceil((error.length + 8) / Math.max(10, cols)) : 0) +
+    (todos.length > 0 ? todos.length + 5 : 0) +
+    (question ? 6 + (question.options?.length ?? 0) + Math.ceil(question.question.length / Math.max(10, cols - 4)) : 0);
+  const liveMaxRows = Math.max(3, rows - chromeRows);
 
   return (
     <Box flexDirection="column">
-      <Text color={color} bold>{art}</Text>
-      <Text dimColor>{sep}</Text>
+      <Static key={staticGen} items={staticItems}>
+        {(item) =>
+          item.kind === "logo" ? (
+            <Box key={item.key} flexDirection="column">
+              <Text color={color} bold>{art}</Text>
+              <Text dimColor>{sep}</Text>
+            </Box>
+          ) : (
+            <MessageView key={item.key} message={item.message} />
+          )
+        }
+      </Static>
 
-      {visibleMessages.length === 0 && (
+      {messages.length === 0 && (
         <Text dimColor>Envie uma mensagem (Enter enviar | Ctrl+E pensamento | Ctrl+O modo | Ctrl+C sair)</Text>
       )}
-      {visibleMessages.map((m, i) => (
-        <Box key={i} flexDirection="column" marginBottom={1}>
-          <Text bold color={m.role === "user" ? "cyan" : "green"}>
-            {m.role === "user" ? "voce>" : "ia>"}
-          </Text>
-          {m.role === "assistant" ? (
-            <MarkdownText>{m.content}</MarkdownText>
-          ) : (
-            <Text>{m.content}</Text>
-          )}
-          {m.reasoning && (
-            <Text dimColor italic>{"  thinking: " + m.reasoning.slice(0, 200) + (m.reasoning.length > 200 ? "..." : "")}</Text>
-          )}
-        </Box>
-      ))}
       {streaming && liveText && (
         <Box flexDirection="column" marginBottom={1}>
-          <Text bold color="green">{"ia>"}</Text>
-          <MarkdownText>{liveText}</MarkdownText>
+          <LiveResponse text={liveText} cols={cols} maxRows={liveMaxRows} />
         </Box>
       )}
 
@@ -530,12 +578,14 @@ export const App: React.FC<AppProps> = ({ config, overrides }) => {
 
 export async function startApp(config: AppConfig, overrides: { model?: string; reasoning?: ReasoningLevel; mode?: Mode }) {
   clearScreen();
+  const disableSync = enableSynchronizedOutput();
   try {
     // exitOnCtrlC must be off: with Ink's default, useInput never receives Ctrl+C, so the
     // app would exit instead of cancelling the current response.
     const app = render(<App config={config} overrides={overrides} />, { exitOnCtrlC: false });
     await app.waitUntilExit();
   } finally {
+    disableSync();
     restoreTerminal();
   }
 }

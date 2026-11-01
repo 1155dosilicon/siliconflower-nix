@@ -6,6 +6,11 @@ Todas as mudanças relevantes ficam registradas aqui. O formato segue o
 
 ## [Unreleased]
 
+### Fixed
+- TUI piscava ao gerar respostas: com o logo e o histórico dentro do quadro dinâmico do Ink, o quadro passava da altura do terminal e o Ink limpava e redesenhava a tela inteira a cada token. Logo e mensagens finalizadas agora vão para `<Static>` (impressos uma vez no scrollback) e a resposta em andamento mostra só o final que cabe na tela (`src/LiveResponse.tsx`). Teste: `tests/tui-flicker.test.ts`.
+- O texto em streaming é repassado à TUI no máximo a cada 60 ms, em vez de a cada pedaço recebido.
+- Cada quadro é enviado entre marcadores de saída sincronizada (DEC 2026), para os terminais com suporte desenharem tudo de uma vez; `SILICONFLOWER_NO_SYNC_OUTPUT=1` desativa.
+
 ## [0.2.9] - 2026-10-31
 
 Backport das correções do Siliconflower para Windows (0.2.7 a 0.2.9) para a versão Linux/Unix. Os itens das seções 0.2.7–0.2.9 abaixo valem para todas as plataformas, salvo os marcados como Windows; as adaptações para Linux/Unix estão nesta lista.
