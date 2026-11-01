@@ -8,6 +8,11 @@
 
 export const ANSI_CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
 export const ANSI_SHOW_CURSOR = "\x1b[?25h";
+// DEC mode 2026 (synchronized output): the terminal holds the screen until the end marker,
+// so a frame that is erased and rewritten is shown at once instead of flashing. Terminals
+// without support ignore the unknown mode.
+export const ANSI_SYNC_BEGIN = "\x1b[?2026h";
+export const ANSI_SYNC_END = "\x1b[?2026l";
 
 export interface TerminalOptions {
   force?: boolean;
@@ -67,4 +72,27 @@ function registerLifecycleHooks(stream: NodeJS.WriteStream) {
   if (process.platform === "win32") {
     process.once("SIGBREAK" as NodeJS.Signals, handleSignal);
   }
+}
+
+/**
+ * Wraps every write to `stream` in synchronized-output markers, so each Ink frame (erase +
+ * redraw, sent in a single write) is presented atomically. Returns a function that undoes
+ * the wrapping. No-op when the stream is not a TTY or SILICONFLOWER_NO_SYNC_OUTPUT is set.
+ */
+export function enableSynchronizedOutput(options?: TerminalOptions): () => void {
+  const stream = options?.stream ?? process.stdout;
+  const isTty = Boolean(stream.isTTY || options?.force);
+  if (!isTty || process.env.SILICONFLOWER_NO_SYNC_OUTPUT) return () => {};
+
+  const original = stream.write;
+  const wrapped = function (this: NodeJS.WriteStream, chunk: unknown, ...rest: unknown[]) {
+    if (typeof chunk === "string" && chunk.length > 0) {
+      chunk = ANSI_SYNC_BEGIN + chunk + ANSI_SYNC_END;
+    }
+    return (original as (...args: unknown[]) => boolean).call(this, chunk, ...rest);
+  } as typeof stream.write;
+  stream.write = wrapped;
+  return () => {
+    if (stream.write === wrapped) stream.write = original;
+  };
 }
